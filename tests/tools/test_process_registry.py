@@ -522,6 +522,8 @@ class TestSpawnEnvSanitization:
         assert session.pid is None
         assert session.output_buffer == "syntax error"
         fake_thread.start.assert_not_called()
+        # A failed launch must not be exposed as a running/tracked session.
+        assert session.id not in registry._running
 
     def test_spawn_via_env_disables_rewrite_for_bg_wrapper(self, registry):
         class FakeEnv:
