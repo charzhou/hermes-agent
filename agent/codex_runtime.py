@@ -225,6 +225,8 @@ _WEBSOCKET_TRANSPORT_VALUES = frozenset({
     "wss",
 })
 
+_RESPONSES_WEBSOCKETS_BETA_VALUE = "responses_websockets=2026-02-06"
+
 _WEBSOCKET_BODY_EXCLUDED_KEYS = frozenset({
     "timeout",
     "extra_headers",
@@ -410,6 +412,16 @@ def _codex_websocket_headers(agent, api_kwargs: Dict[str, Any]) -> Dict[str, str
             for key, value in extra_headers.items()
             if key and value is not None
         })
+
+    beta_key = next((key for key in headers if key.lower() == "openai-beta"), "OpenAI-Beta")
+    beta_values = [
+        value.strip()
+        for value in str(headers.get(beta_key, "") or "").split(",")
+        if value.strip()
+    ]
+    if _RESPONSES_WEBSOCKETS_BETA_VALUE not in beta_values:
+        beta_values.append(_RESPONSES_WEBSOCKETS_BETA_VALUE)
+    headers[beta_key] = ", ".join(beta_values)
 
     api_key = str(getattr(agent, "api_key", "") or "").strip()
     has_authorization = any(key.lower() == "authorization" for key in headers)

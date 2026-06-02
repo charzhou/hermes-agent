@@ -64,6 +64,18 @@ def test_provider_config_transport_string_can_enable_websocket(monkeypatch):
     assert codex_runtime.codex_responses_websocket_enabled(agent) is True
 
 
+def test_codex_websocket_headers_append_responses_websockets_beta():
+    agent = SimpleNamespace(api_key="sk-test")
+
+    headers = codex_runtime._codex_websocket_headers(
+        agent,
+        {"extra_headers": {"OpenAI-Beta": "assistants=v2"}},
+    )
+
+    beta_values = {value.strip() for value in headers["OpenAI-Beta"].split(",")}
+    assert beta_values == {"assistants=v2", "responses_websockets=2026-02-06"}
+
+
 def test_provider_config_does_not_stop_at_same_url_without_switch(monkeypatch):
     config = {
         "providers": {
@@ -221,6 +233,7 @@ def test_run_codex_stream_uses_provider_websocket_payload(monkeypatch):
     assert connect_calls[0]["uri"] == "wss://api.vendor.example.com/v1/responses"
     assert connect_calls[0]["additional_headers"]["Authorization"] == "Bearer sk-test"
     assert connect_calls[0]["additional_headers"]["X-Provider-Header"] == "abc"
+    assert connect_calls[0]["additional_headers"]["OpenAI-Beta"] == "responses_websockets=2026-02-06"
 
     sent = fake_ws.sent_payloads[0]
     assert sent["type"] == "response.create"
