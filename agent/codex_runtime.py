@@ -616,8 +616,10 @@ def disable_codex_responses_websocket_for_turn(
     agent._codex_responses_websocket_http_fallback_key = key
     agent._codex_responses_websocket_http_fallback_reason = reason
     agent._codex_responses_websocket_chain_invalidated_key = key
-    logger.debug(
-        "Disabled Codex Responses WebSocket for current turn (%s). %s error=%s",
+    logger.warning(
+        "codex_responses_websocket_event=http_fallback "
+        "Codex Responses WebSocket disabled for current turn; falling back to HTTP "
+        "(reason=%s). %s error=%s",
         reason,
         getattr(agent, "_client_log_context", lambda: "")(),
         error,
@@ -716,6 +718,11 @@ def run_codex_websocket(
     headers = _codex_websocket_headers(agent, api_kwargs)
     force_full_input = _codex_responses_websocket_chain_invalidated(agent)
     if force_full_input:
+        logger.info(
+            "codex_responses_websocket_event=restore_full_input "
+            "Codex Responses WebSocket chain invalidated; reopening with full input. %s",
+            getattr(agent, "_client_log_context", lambda: "")(),
+        )
         close_codex_responses_websocket_session(agent)
     session = _get_codex_responses_websocket_session(
         agent,
@@ -763,6 +770,13 @@ def run_codex_websocket(
         active_session.record_response(final_response, full_input)
         if force_full and active_session.previous_response_id:
             clear_codex_responses_websocket_chain_invalidated(agent)
+            logger.info(
+                "codex_responses_websocket_event=restore_full_input_completed "
+                "Codex Responses WebSocket recovered; full-input request completed "
+                "(response_id=%s). %s",
+                active_session.previous_response_id,
+                getattr(agent, "_client_log_context", lambda: "")(),
+            )
         return final_response, used_continuation
 
     try:
@@ -771,6 +785,13 @@ def run_codex_websocket(
         exc = _current_exception()
         close_codex_responses_websocket_session(agent)
         if _is_previous_response_missing_error(exc):
+            logger.warning(
+                "codex_responses_websocket_event=previous_response_rejected "
+                "Codex Responses WebSocket previous_response_id rejected; reopening with full input. "
+                "%s error=%s",
+                getattr(agent, "_client_log_context", lambda: "")(),
+                exc,
+            )
             recovery_session = _get_codex_responses_websocket_session(
                 agent,
                 uri=websocket_url,
@@ -784,6 +805,13 @@ def run_codex_websocket(
             and send_state["used_continuation"]
             and should_fallback_codex_responses_websocket_to_http(agent, exc)
         ):
+            logger.warning(
+                "codex_responses_websocket_event=continuation_reopen_before_http_fallback "
+                "Codex Responses WebSocket continuation failed before output; "
+                "reopening with full input before HTTP fallback. %s error=%s",
+                getattr(agent, "_client_log_context", lambda: "")(),
+                exc,
+            )
             recovery_session = _get_codex_responses_websocket_session(
                 agent,
                 uri=websocket_url,

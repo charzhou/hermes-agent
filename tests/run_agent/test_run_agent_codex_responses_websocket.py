@@ -1,4 +1,5 @@
 import json
+import logging
 import sys
 import types
 from types import SimpleNamespace
@@ -492,6 +493,7 @@ def test_run_conversation_codex_responses_does_not_use_websocket_without_provide
 
 def test_run_conversation_codex_responses_websocket_connect_failure_falls_back_to_http_same_provider(
     monkeypatch,
+    caplog,
 ):
     ws_attempts = []
 
@@ -534,7 +536,8 @@ def test_run_conversation_codex_responses_websocket_connect_failure_falls_back_t
     agent = _make_codex_responses_ws_agent("codex-responses-ws-http-fallback")
     agent._create_request_openai_client = lambda *args, **kwargs: _HTTPOpenAIClient()
 
-    result = agent.run_conversation("Reply http-ok.")
+    with caplog.at_level(logging.WARNING, logger="agent.codex_runtime"):
+        result = agent.run_conversation("Reply http-ok.")
 
     assert result["completed"] is True
     assert result["final_response"] == "http-ok"
@@ -544,6 +547,10 @@ def test_run_conversation_codex_responses_websocket_connect_failure_falls_back_t
     assert "previous_response_id" not in http_calls[0]
     request_input = json.dumps(http_calls[0]["input"], ensure_ascii=False)
     assert "Reply http-ok" in request_input
+    assert "Codex Responses WebSocket disabled for current turn" in caplog.text
+    assert "codex_responses_websocket_event=http_fallback" in caplog.text
+    assert "falling back to HTTP" in caplog.text
+    assert "websocket_transport_error" in caplog.text
 
 
 def test_run_conversation_codex_responses_websocket_fallback_keeps_remaining_turn_on_full_http(
@@ -770,6 +777,7 @@ class _RestoredResponsesWebSocket:
 
 def test_run_conversation_codex_responses_websocket_restores_with_full_input_after_http_fallback(
     monkeypatch,
+    caplog,
 ):
     ws_connect_attempts = []
     connections = []
@@ -821,16 +829,17 @@ def test_run_conversation_codex_responses_websocket_restores_with_full_input_aft
     agent = _make_codex_responses_ws_agent("codex-responses-ws-restore-after-http", max_iterations=2)
     agent._create_request_openai_client = lambda *args, **kwargs: _HTTPOpenAIClient()
 
-    first = agent.run_conversation("Initial turn. Reply http-first.")
-    assert first["completed"] is True
-    assert first["final_response"] == "http-first"
+    with caplog.at_level(logging.INFO, logger="agent.codex_runtime"):
+        first = agent.run_conversation("Initial turn. Reply http-first.")
+        assert first["completed"] is True
+        assert first["final_response"] == "http-first"
 
-    second = agent.run_conversation(
-        "Second turn. Reply ws-restored.",
-        conversation_history=first["messages"],
-    )
-    assert second["completed"] is True
-    assert second["final_response"] == "ws-restored"
+        second = agent.run_conversation(
+            "Second turn. Reply ws-restored.",
+            conversation_history=first["messages"],
+        )
+        assert second["completed"] is True
+        assert second["final_response"] == "ws-restored"
 
     third = agent.run_conversation(
         "Third turn. Reply ws-third.",
@@ -859,6 +868,11 @@ def test_run_conversation_codex_responses_websocket_restores_with_full_input_aft
     assert "Initial turn" not in incremental_input
     assert "http-first" not in incremental_input
     assert "Second turn" not in incremental_input
+    assert "chain invalidated" in caplog.text
+    assert "codex_responses_websocket_event=restore_full_input" in caplog.text
+    assert "codex_responses_websocket_event=restore_full_input_completed" in caplog.text
+    assert "reopening with full input" in caplog.text
+    assert "full-input request completed" in caplog.text
 
 
 class _RecoveringResponsesWebSocket:
@@ -1037,6 +1051,7 @@ class _StaleThenReopenedResponsesWebSocket:
 
 def test_run_conversation_codex_responses_websocket_reopens_stale_socket_before_http_fallback(
     monkeypatch,
+    caplog,
 ):
     connections = []
 
@@ -1077,10 +1092,11 @@ def test_run_conversation_codex_responses_websocket_reopens_stale_socket_before_
     # first request. The next turn should reopen WebSocket and retry full input.
     connections[0]["fail_send"] = True
 
-    second = agent.run_conversation(
-        "Second turn. Reply second-ok.",
-        conversation_history=first["messages"],
-    )
+    with caplog.at_level(logging.WARNING, logger="agent.codex_runtime"):
+        second = agent.run_conversation(
+            "Second turn. Reply second-ok.",
+            conversation_history=first["messages"],
+        )
 
     assert second["completed"] is True
     assert second["final_response"] == "second-ok"
@@ -1098,3 +1114,7 @@ def test_run_conversation_codex_responses_websocket_reopens_stale_socket_before_
     assert "First turn" in reopened_input
     assert "first-ok" in reopened_input
     assert "Second turn" in reopened_input
+    assert "continuation failed before output" in caplog.text
+    assert "codex_responses_websocket_event=continuation_reopen_before_http_fallback" in caplog.text
+    assert "reopening with full input before HTTP fallback" in caplog.text
+    assert "stale websocket send failed" in caplog.text
