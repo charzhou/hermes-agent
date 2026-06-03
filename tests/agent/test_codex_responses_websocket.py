@@ -236,11 +236,13 @@ def test_provider_config_can_fallback_to_base_url_for_custom_provider(monkeypatc
 
 
 class _FakeWebSocket:
-    def __init__(self, events):
+    def __init__(self, events, *, response_headers=None, state_name=None):
         self.events = list(events)
         self.sent_payloads = []
         self.recv_timeouts = []
         self.closed = False
+        self.response = SimpleNamespace(headers=response_headers or {})
+        self.state = SimpleNamespace(name=state_name) if state_name else None
 
     def __enter__(self):
         return self
@@ -341,6 +343,107 @@ def test_run_codex_stream_uses_provider_websocket_payload(monkeypatch):
     assert fake_ws.closed is False
     codex_runtime.close_codex_responses_websocket_session(agent)
     assert fake_ws.closed is True
+
+
+def test_websocket_captures_and_replays_turn_state_on_same_turn_reconnect(monkeypatch):
+    first_ws = _FakeWebSocket(
+        [
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "first"}],
+                },
+            },
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_1", "status": "completed"},
+            },
+        ],
+        response_headers={"x-codex-turn-state": "sticky-turn-token"},
+        state_name="OPEN",
+    )
+    second_ws = _FakeWebSocket(
+        [
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "second"}],
+                },
+            },
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_2", "status": "completed"},
+            },
+        ]
+    )
+    sockets = [first_ws, second_ws]
+    connect_calls = []
+
+    def fake_connect(uri, **kwargs):
+        connect_calls.append({"uri": uri, **kwargs})
+        return sockets.pop(0)
+
+    monkeypatch.setattr(codex_runtime, "codex_responses_websocket_enabled", lambda agent: True)
+    monkeypatch.setattr(codex_runtime, "_connect_responses_websocket", fake_connect, raising=False)
+
+    agent = SimpleNamespace(
+        api_mode="codex_responses",
+        provider="vendor",
+        base_url="https://api.vendor.example.com/v1",
+        api_key="sk-test",
+        session_id="hermes-session-123",
+        _thread_id="hermes-thread-456",
+        _interrupt_requested=False,
+        _fire_stream_delta=lambda text: None,
+        _fire_reasoning_delta=lambda text: None,
+        _touch_activity=lambda text: None,
+        _client_log_context=lambda: "test-context",
+    )
+    api_kwargs = {
+        "model": "gpt-5-codex",
+        "instructions": "You are Hermes.",
+        "input": [{"role": "user", "content": "Ping"}],
+        "store": False,
+        "stream": True,
+    }
+
+    codex_runtime.run_codex_stream(agent, api_kwargs)
+    first_ws.state = SimpleNamespace(name="CLOSED")
+    codex_runtime.run_codex_stream(
+        agent,
+        {
+            **api_kwargs,
+            "input": [
+                {"role": "user", "content": "Ping"},
+                {"role": "assistant", "content": "first"},
+                {"role": "user", "content": "Again"},
+            ],
+        },
+    )
+
+    assert "x-codex-turn-state" not in connect_calls[0]["additional_headers"]
+    assert (
+        connect_calls[1]["additional_headers"]["x-codex-turn-state"]
+        == "sticky-turn-token"
+    )
+
+
+def test_websocket_turn_state_resets_at_conversation_turn_boundary():
+    agent = SimpleNamespace(
+        _codex_responses_websocket_output_committed=True,
+        _codex_responses_websocket_turn_state="sticky-turn-token",
+    )
+
+    codex_runtime.reset_codex_responses_websocket_turn_fallback(agent)
+
+    assert agent._codex_responses_websocket_output_committed is False
+    assert agent._codex_responses_websocket_turn_state is None
 
 
 def test_websocket_stream_json_events_normalize_function_call_items(monkeypatch):

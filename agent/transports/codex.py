@@ -11,6 +11,38 @@ from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
 
 
+_CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
+
+
+def _header_present(headers: Dict[str, str], name: str) -> bool:
+    target = name.lower()
+    return any(str(key).lower() == target for key in headers)
+
+
+def _set_header_if_missing(headers: Dict[str, str], name: str, value: Any) -> None:
+    value = str(value or "").strip()
+    if not value or _header_present(headers, name):
+        return
+    headers[name] = value
+
+
+def _merge_extra_headers_if_missing(kwargs: Dict[str, Any], headers_to_add: Dict[str, Any]) -> None:
+    existing_extra_headers = kwargs.get("extra_headers")
+    merged_extra_headers: Dict[str, str] = {}
+    if isinstance(existing_extra_headers, dict):
+        merged_extra_headers.update(
+            {
+                str(key): str(value)
+                for key, value in existing_extra_headers.items()
+                if key and value is not None
+            }
+        )
+    for name, value in headers_to_add.items():
+        _set_header_if_missing(merged_extra_headers, name, value)
+    if merged_extra_headers:
+        kwargs["extra_headers"] = merged_extra_headers
+
+
 class ResponsesApiTransport(ProviderTransport):
     """Transport for api_mode='codex_responses'.
 
@@ -71,7 +103,9 @@ class ResponsesApiTransport(ProviderTransport):
         params:
             instructions: str — system prompt (extracted from messages[0] if not given)
             reasoning_config: dict | None — {effort, enabled}
-            session_id: str | None — used for prompt_cache_key + xAI conv header
+            session_id: str | None — used for prompt_cache_key + session headers
+            thread_id: str | None — used for Codex session affinity headers
+            codex_turn_state: str | None — same-turn sticky routing token
             max_tokens: int | None — max_output_tokens
             timeout: float | None — per-request timeout forwarded to the SDK
             request_overrides: dict | None — extra kwargs merged in
@@ -217,23 +251,17 @@ class ResponsesApiTransport(ProviderTransport):
         else:
             kwargs.pop("timeout", None)
 
-        if is_codex_backend:
-            prompt_cache_key = kwargs.get("prompt_cache_key")
-            cache_scope_id = str(prompt_cache_key or session_id or "").strip()
-            if cache_scope_id:
-                existing_extra_headers = kwargs.get("extra_headers")
-                merged_extra_headers: Dict[str, str] = {}
-                if isinstance(existing_extra_headers, dict):
-                    merged_extra_headers.update(
-                        {
-                            str(key): str(value)
-                            for key, value in existing_extra_headers.items()
-                            if key and value is not None
-                        }
-                    )
-                merged_extra_headers["session_id"] = cache_scope_id
-                merged_extra_headers["x-client-request-id"] = cache_scope_id
-                kwargs["extra_headers"] = merged_extra_headers
+        if session_id and not is_xai_responses:
+            thread_id = str(params.get("thread_id") or session_id).strip()
+            _merge_extra_headers_if_missing(
+                kwargs,
+                {
+                    "session-id": session_id,
+                    "thread-id": thread_id,
+                    "x-client-request-id": thread_id,
+                    _CODEX_TURN_STATE_HEADER: params.get("codex_turn_state"),
+                },
+            )
 
         max_tokens = params.get("max_tokens")
         if max_tokens is not None and not is_codex_backend:

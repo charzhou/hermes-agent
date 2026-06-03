@@ -228,6 +228,7 @@ _WEBSOCKET_TRANSPORT_VALUES = frozenset({
 _RESPONSES_WEBSOCKETS_BETA_VALUE = "responses_websockets=2026-02-06"
 _WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached"
 _WEBSOCKET_ERROR_MARKER = "_hermes_codex_responses_websocket_error"
+_CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
 
 _WEBSOCKET_BODY_EXCLUDED_KEYS = frozenset({
     "timeout",
@@ -414,6 +415,57 @@ def _set_header_if_missing(headers: Dict[str, str], name: str, value: str) -> No
     if not value or _header_present(headers, name):
         return
     headers[name] = value
+
+
+def _codex_responses_turn_state(agent) -> str:
+    return str(getattr(agent, "_codex_responses_websocket_turn_state", "") or "").strip()
+
+
+def _set_codex_responses_turn_state(agent, value: Any) -> None:
+    turn_state = str(value or "").strip()
+    if not turn_state:
+        return
+    agent._codex_responses_websocket_turn_state = turn_state
+    logger.info(
+        "codex_responses_websocket_event=turn_state_captured "
+        "Codex Responses WebSocket captured same-turn sticky routing token. %s",
+        getattr(agent, "_client_log_context", lambda: "")(),
+    )
+
+
+def _headers_get_case_insensitive(headers: Any, name: str) -> Optional[str]:
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)
+    except Exception:
+        value = None
+    if value is not None:
+        return str(value).strip()
+    try:
+        items = headers.items()
+    except Exception:
+        return None
+    target = name.lower()
+    for key, value in items:
+        if str(key).lower() == target and value is not None:
+            return str(value).strip()
+    return None
+
+
+def _codex_websocket_response_header(websocket: Any, raw_context: Any, name: str) -> Optional[str]:
+    for source in (websocket, raw_context):
+        response = getattr(source, "response", None)
+        value = _headers_get_case_insensitive(getattr(response, "headers", None), name)
+        if value:
+            return value
+        value = _headers_get_case_insensitive(getattr(source, "response_headers", None), name)
+        if value:
+            return value
+        value = _headers_get_case_insensitive(getattr(source, "headers", None), name)
+        if value:
+            return value
+    return None
 
 
 def _codex_responses_session_header_values(agent) -> tuple[str, str]:
@@ -693,10 +745,14 @@ class _CodexResponsesWebSocketSession:
         uri: str,
         headers: Dict[str, str],
         open_timeout: float,
+        turn_state_supplier=None,
+        on_turn_state=None,
     ) -> None:
         self.uri = uri
         self.headers = dict(headers)
         self.open_timeout = open_timeout
+        self._turn_state_supplier = turn_state_supplier or (lambda: "")
+        self._on_turn_state = on_turn_state or (lambda value: None)
         self.websocket = None
         self._context = None
         self.previous_response_id: Optional[str] = None
@@ -726,10 +782,18 @@ class _CodexResponsesWebSocketSession:
                 _websocket_state_name(self.websocket) or "unknown",
             )
             self.close()
+        connect_headers = dict(self.headers)
+        turn_state = str(self._turn_state_supplier() or "").strip()
+        if turn_state:
+            _set_header_if_missing(connect_headers, _CODEX_TURN_STATE_HEADER, turn_state)
+            logger.info(
+                "codex_responses_websocket_event=turn_state_replayed "
+                "Codex Responses WebSocket replaying same-turn sticky routing token."
+            )
         raw = _connect_responses_websocket(
             self.uri,
-            additional_headers=self.headers,
-            user_agent_header=_codex_websocket_user_agent_header(self.headers),
+            additional_headers=connect_headers,
+            user_agent_header=_codex_websocket_user_agent_header(connect_headers),
             open_timeout=self.open_timeout,
             close_timeout=10,
             max_size=None,
@@ -740,6 +804,13 @@ class _CodexResponsesWebSocketSession:
         else:
             self.websocket = raw
         self.closed = False
+        turn_state = _codex_websocket_response_header(
+            self.websocket,
+            raw,
+            _CODEX_TURN_STATE_HEADER,
+        )
+        if turn_state:
+            self._on_turn_state(turn_state)
         return self.websocket
 
     def close(self) -> None:
@@ -901,6 +972,7 @@ def close_codex_responses_websocket_session(agent) -> None:
 def reset_codex_responses_websocket_turn_fallback(agent) -> None:
     """Reset per-turn stream state while preserving session-scoped HTTP fallback."""
     agent._codex_responses_websocket_output_committed = False
+    agent._codex_responses_websocket_turn_state = None
 
 
 def mark_codex_responses_websocket_error(exc: BaseException) -> None:
@@ -1041,6 +1113,8 @@ def _get_codex_responses_websocket_session(
         uri=uri,
         headers=headers,
         open_timeout=open_timeout,
+        turn_state_supplier=lambda: _codex_responses_turn_state(agent),
+        on_turn_state=lambda value: _set_codex_responses_turn_state(agent, value),
     )
     agent._codex_responses_websocket_session = session
     return session

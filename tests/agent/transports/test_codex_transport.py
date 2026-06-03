@@ -91,6 +91,61 @@ class TestCodexBuildKwargs:
         )
         assert kw.get("prompt_cache_key") == "test-session-123"
 
+    def test_session_id_sets_codex_session_headers(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            session_id="test-session-123",
+            thread_id="test-thread-456",
+        )
+
+        headers = kw.get("extra_headers", {})
+        assert headers["session-id"] == "test-session-123"
+        assert headers["thread-id"] == "test-thread-456"
+        assert headers["x-client-request-id"] == "test-thread-456"
+
+    def test_codex_session_headers_preserve_request_overrides(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            session_id="derived-session",
+            thread_id="derived-thread",
+            request_overrides={
+                "extra_headers": {
+                    "Session-ID": "explicit-session",
+                    "Thread-ID": "explicit-thread",
+                    "X-Client-Request-ID": "explicit-request",
+                    "X-Trace": "abc",
+                }
+            },
+        )
+
+        headers = kw.get("extra_headers", {})
+        assert headers["Session-ID"] == "explicit-session"
+        assert headers["Thread-ID"] == "explicit-thread"
+        assert headers["X-Client-Request-ID"] == "explicit-request"
+        assert headers["X-Trace"] == "abc"
+        assert "session-id" not in headers
+        assert "thread-id" not in headers
+        assert "x-client-request-id" not in headers
+
+    def test_codex_turn_state_header_is_forwarded_when_present(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            session_id="test-session-123",
+            thread_id="test-thread-456",
+            codex_turn_state="sticky-turn-token",
+        )
+
+        assert kw.get("extra_headers", {})["x-codex-turn-state"] == "sticky-turn-token"
+
     def test_github_responses_no_cache_key(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(

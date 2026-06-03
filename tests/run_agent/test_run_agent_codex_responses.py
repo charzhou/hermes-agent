@@ -300,6 +300,20 @@ def test_build_api_kwargs_codex(monkeypatch):
     assert "extra_body" not in kwargs
 
 
+def test_build_api_kwargs_codex_includes_session_affinity_and_turn_state(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    agent._thread_id = "thread-for-sticky-routing"
+    agent._codex_responses_websocket_turn_state = "turn-state-token"
+
+    kwargs = agent._build_api_kwargs([{"role": "user", "content": "Ping"}])
+
+    headers = kwargs.get("extra_headers", {})
+    assert headers["session-id"] == agent.session_id
+    assert headers["thread-id"] == "thread-for-sticky-routing"
+    assert headers["x-client-request-id"] == "thread-for-sticky-routing"
+    assert headers["x-codex-turn-state"] == "turn-state-token"
+
+
 def test_build_api_kwargs_codex_clamps_minimal_effort(monkeypatch):
     """'minimal' reasoning effort is clamped to 'low' on the Responses API.
 
