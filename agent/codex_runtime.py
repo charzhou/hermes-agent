@@ -411,6 +411,14 @@ def _header_present(headers: Dict[str, str], name: str) -> bool:
     return any(str(key).lower() == target for key in headers)
 
 
+def _pop_header_case_insensitive(headers: Dict[str, str], name: str) -> Optional[str]:
+    target = name.lower()
+    for key in list(headers):
+        if str(key).lower() == target:
+            return headers.pop(key)
+    return None
+
+
 def _set_header_if_missing(headers: Dict[str, str], name: str, value: str) -> None:
     if not value or _header_present(headers, name):
         return
@@ -483,6 +491,9 @@ def _codex_websocket_headers(agent, api_kwargs: Dict[str, Any]) -> Dict[str, str
             for key, value in extra_headers.items()
             if key and value is not None
         })
+    # This is a dynamic handshake token. Keeping it in the stable session
+    # headers would make later API calls recreate an otherwise reusable socket.
+    _pop_header_case_insensitive(headers, _CODEX_TURN_STATE_HEADER)
 
     session_id, thread_id = _codex_responses_session_header_values(agent)
     _set_header_if_missing(headers, "session-id", session_id)
