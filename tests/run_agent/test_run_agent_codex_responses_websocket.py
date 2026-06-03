@@ -908,6 +908,111 @@ def test_run_conversation_codex_responses_websocket_does_not_http_fallback_after
     assert http_calls == []
 
 
+class _ToolCallThenKeepaliveTimeoutResponsesWebSocket:
+    def __init__(self, connection):
+        self.connection = connection
+        self.events = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.connection["closed"] = True
+        return False
+
+    def close(self):
+        self.connection["closed"] = True
+
+    def send(self, payload):
+        sent = json.loads(payload)
+        self.connection["sends"].append({"sent": sent})
+        self.events = [
+            {"type": "response.created", "response": {"id": "resp_keepalive", "status": "in_progress"}},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "name": "weather",
+                    "call_id": "call_weather_1",
+                    "arguments": "{}",
+                },
+            },
+        ]
+
+    def recv(self, timeout=None):
+        if self.events:
+            return json.dumps(self.events.pop(0))
+        raise ConnectionClosedError(
+            "sent 1011 (internal error) keepalive ping timeout; no close frame received"
+        )
+
+
+def test_run_conversation_codex_responses_websocket_falls_back_after_keepalive_timeout_without_visible_output(
+    monkeypatch,
+    caplog,
+):
+    connections = []
+
+    def fake_connect(uri, **kwargs):
+        connection = {
+            "uri": uri,
+            "headers": kwargs.get("additional_headers") or {},
+            "sends": [],
+        }
+        connections.append(connection)
+        return _ToolCallThenKeepaliveTimeoutResponsesWebSocket(connection)
+
+    monkeypatch.setattr(codex_runtime, "_connect_responses_websocket", fake_connect)
+
+    http_calls = []
+
+    class _HTTPResponses:
+        def create(self, **kwargs):
+            http_calls.append(kwargs)
+            return _FakeCreateStream(
+                [
+                    {"type": "response.output_text.delta", "delta": "http-weather"},
+                    {
+                        "type": "response.output_item.done",
+                        "item": {
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": "http-weather"}],
+                        },
+                    },
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_http_keepalive", "status": "completed"},
+                    },
+                ]
+            )
+
+    class _HTTPOpenAIClient:
+        responses = _HTTPResponses()
+
+        def close(self):
+            pass
+
+    agent = _make_codex_responses_ws_agent("codex-responses-ws-keepalive-http")
+    agent._api_max_retries = 2
+    agent._create_request_openai_client = lambda *args, **kwargs: _HTTPOpenAIClient()
+
+    with caplog.at_level(logging.WARNING, logger="agent.codex_runtime"):
+        result = agent.run_conversation("Find weather and summarize it.")
+
+    assert result["completed"] is True
+    assert result["final_response"] == "http-weather"
+    assert len(connections) == 2
+    assert len(http_calls) == 1
+    assert "previous_response_id" not in http_calls[0]
+    request_input = json.dumps(http_calls[0]["input"], ensure_ascii=False)
+    assert "Find weather and summarize it." in request_input
+    assert "codex_responses_websocket_event=retry_transport_error" in caplog.text
+    assert "codex_responses_websocket_event=http_fallback" in caplog.text
+    assert "keepalive ping timeout" in caplog.text
+
+
 class _RestoredResponsesWebSocket:
     def __init__(self, connection):
         self.connection = connection
@@ -1084,6 +1189,130 @@ class _RecoveringResponsesWebSocket:
         if not self.events:
             raise AssertionError("Hermes consumed past terminal WebSocket event")
         return json.dumps(self.events.pop(0))
+
+
+class _ReasoningTextResponsesWebSocket:
+    def __init__(self, connection):
+        self.connection = connection
+        self.events = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.connection["closed"] = True
+        return False
+
+    def close(self):
+        self.connection["closed"] = True
+
+    def send(self, payload):
+        sent = json.loads(payload)
+        self.connection["sends"].append({"sent": sent})
+        call_number = len(self.connection["sends"])
+        response_id = f"resp_{call_number}"
+        message_id = f"msg_{call_number}"
+        reasoning_id = f"rs_{call_number}"
+        text = "first-ok" if call_number == 1 else "second-ok"
+        self.events = [
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "id": reasoning_id,
+                    "encrypted_content": f"encrypted-{call_number}",
+                    "summary": [],
+                },
+            },
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "id": message_id,
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text}],
+                },
+            },
+            {
+                "type": "response.completed",
+                "response": {"id": response_id, "status": "completed"},
+            },
+        ]
+
+    def recv(self, timeout=None):
+        if not self.events:
+            raise AssertionError("Hermes consumed past terminal WebSocket event")
+        return json.dumps(self.events.pop(0))
+
+
+def test_run_conversation_codex_responses_websocket_preserves_custom_issuer_reasoning_chain(
+    monkeypatch,
+):
+    connections = []
+
+    def fake_connect(uri, **kwargs):
+        connection = {
+            "uri": uri,
+            "headers": kwargs.get("additional_headers") or {},
+            "sends": [],
+        }
+        connections.append(connection)
+        return _ReasoningTextResponsesWebSocket(connection)
+
+    monkeypatch.setattr(codex_runtime, "_connect_responses_websocket", fake_connect)
+
+    agent = run_agent.AIAgent(
+        model="gpt-5.4",
+        provider="sub2api-test",
+        api_mode="codex_responses",
+        base_url="https://sub2api.tegical.com/v1",
+        api_key="sk-test",
+        quiet_mode=True,
+        max_iterations=3,
+        enabled_toolsets=[],
+        disabled_toolsets=["terminal", "web", "browser", "memory", "todo"],
+        skip_context_files=True,
+        skip_memory=True,
+        load_soul_identity=False,
+        session_id="codex-responses-ws-custom-issuer-e2e",
+        reasoning_config={"enabled": True, "effort": "low"},
+        max_tokens=80,
+    )
+    agent._cleanup_task_resources = lambda task_id: None
+    agent._persist_session = lambda messages, history=None: None
+    agent._save_trajectory = lambda messages, user_message, completed: None
+    agent._create_request_openai_client = (
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("codex_responses WebSocket path must not create an HTTP request client")
+        )
+    )
+
+    first = agent.run_conversation("First turn. Reply first-ok.")
+    assert first["completed"] is True
+    assert first["final_response"] == "first-ok"
+
+    reasoning_items = first["messages"][1].get("codex_reasoning_items")
+    assert reasoning_items
+    assert reasoning_items[0]["_issuer_kind"] == "other:https://sub2api.tegical.com/v1"
+
+    second = agent.run_conversation(
+        "Second turn. Reply second-ok.",
+        conversation_history=first["messages"],
+    )
+
+    assert second["completed"] is True
+    assert second["final_response"] == "second-ok"
+    assert len(connections) == 1
+
+    sends = connections[0]["sends"]
+    assert len(sends) == 2
+    assert "previous_response_id" not in sends[0]["sent"]
+    assert sends[1]["sent"]["previous_response_id"] == "resp_1"
+    second_input = json.dumps(sends[1]["sent"]["input"], ensure_ascii=False)
+    assert "Second turn" in second_input
+    assert "First turn" not in second_input
+    assert "first-ok" not in second_input
 
 
 def test_run_conversation_codex_responses_websocket_recovers_with_full_input_when_previous_id_is_missing(

@@ -304,7 +304,11 @@ class ResponsesApiTransport(ProviderTransport):
         # otherwise the stash from the matching build_kwargs/convert_messages
         # call. Either way it gets stamped onto reasoning items so future
         # turns can detect a model swap and drop foreign-issuer blobs.
-        issuer_kind = kwargs.get("issuer_kind") or self._last_issuer_kind
+        issuer_kind = (
+            kwargs.get("issuer_kind")
+            or getattr(response, "issuer_kind", None)
+            or self._last_issuer_kind
+        )
         # _normalize_codex_response returns (SimpleNamespace, finish_reason_str)
         msg, finish_reason = _normalize_codex_response(response, issuer_kind=issuer_kind)
 

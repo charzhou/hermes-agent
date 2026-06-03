@@ -294,6 +294,17 @@ def _codex_websocket_transport_key(agent) -> tuple[str, str]:
     )
 
 
+def _codex_response_issuer_kind_for_agent(agent) -> str:
+    from agent.codex_responses_adapter import _classify_responses_issuer
+
+    return _classify_responses_issuer(
+        is_xai_responses=bool(getattr(agent, "_is_xai_responses", False)),
+        is_github_responses=bool(getattr(agent, "_is_github_responses", False)),
+        is_codex_backend=bool(getattr(agent, "_is_codex_backend", False)),
+        base_url=getattr(agent, "base_url", None),
+    )
+
+
 def _entry_base_url(entry: Dict[str, Any]) -> str:
     for key in ("base_url", "url", "api"):
         value = entry.get(key)
@@ -1097,6 +1108,14 @@ def _codex_responses_websocket_chain_invalidated(agent) -> bool:
 
 
 def codex_responses_websocket_output_committed(agent) -> bool:
+    """Return True only after visible text was delivered outside this request.
+
+    WebSocket streams can receive internal output events (function calls,
+    reasoning items, or buffered text) before ``response.completed``. Those
+    events are safe to retry/fallback when nothing has been sent to the user.
+    The unsafe boundary is external delivery via stream callbacks, because an
+    HTTP retry would duplicate already-visible text.
+    """
     return bool(getattr(agent, "_codex_responses_websocket_output_committed", False))
 
 
@@ -1172,6 +1191,7 @@ def run_codex_websocket(
 ) -> SimpleNamespace:
     """Execute one Responses API request over WebSocket mode."""
     websocket_url = codex_responses_websocket_url(getattr(agent, "base_url", ""))
+    issuer_kind = _codex_response_issuer_kind_for_agent(agent)
     timeout = api_kwargs.get("timeout")
     open_timeout = (
         float(timeout)
@@ -1211,12 +1231,6 @@ def run_codex_websocket(
         send_state["used_continuation"] = used_continuation
         websocket.send(json.dumps(payload))
 
-        def _on_event_with_commit(event: Any) -> None:
-            if _codex_websocket_event_commits_output(event):
-                _mark_codex_responses_websocket_output_committed(agent)
-            if on_event is not None:
-                on_event(event)
-
         final_response = _consume_codex_event_stream(
             _iter_codex_websocket_events(
                 websocket,
@@ -1227,9 +1241,10 @@ def run_codex_websocket(
             on_text_delta=on_text_delta,
             on_reasoning_delta=on_reasoning_delta,
             on_first_delta=on_first_delta,
-            on_event=_on_event_with_commit,
+            on_event=on_event,
             interrupt_check=interrupt_check,
         )
+        final_response.issuer_kind = issuer_kind
         active_session.record_response(final_response, full_input)
         if force_full and active_session.previous_response_id:
             clear_codex_responses_websocket_chain_invalidated(agent)
@@ -1294,19 +1309,6 @@ def _event_field(event: Any, name: str, default: Any = None) -> Any:
     if value is None and isinstance(event, dict):
         value = event.get(name, default)
     return value if value is not None else default
-
-
-def _codex_websocket_event_commits_output(event: Any) -> bool:
-    event_type = _event_field(event, "type", "")
-    if not isinstance(event_type, str):
-        return False
-    if event_type == "response.output_item.done":
-        return _event_field(event, "item") is not None
-    if "output_text.delta" in event_type:
-        return bool(_event_field(event, "delta", ""))
-    if "reasoning" in event_type and "delta" in event_type:
-        return bool(_event_field(event, "delta", ""))
-    return False
 
 
 def should_fallback_codex_responses_websocket_to_http(agent, exc: BaseException) -> bool:
@@ -1589,7 +1591,11 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
 
     def _on_text_delta(text: str) -> None:
         agent._codex_streamed_text_parts.append(text)
+        before = getattr(agent, "_current_streamed_assistant_text", "") or ""
         agent._fire_stream_delta(text)
+        after = getattr(agent, "_current_streamed_assistant_text", "") or ""
+        if after != before:
+            _mark_codex_responses_websocket_output_committed(agent)
 
     def _on_reasoning_delta(text: str) -> None:
         agent._fire_reasoning_delta(text)
