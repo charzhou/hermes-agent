@@ -498,6 +498,43 @@ def _safe_snapshot(value: Any) -> Any:
         return value
 
 
+def _plain_jsonish(value: Any) -> Any:
+    if isinstance(value, SimpleNamespace):
+        return {
+            key: _plain_jsonish(val)
+            for key, val in vars(value).items()
+        }
+    if isinstance(value, dict):
+        return {
+            key: _plain_jsonish(val)
+            for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [_plain_jsonish(item) for item in value]
+    if isinstance(value, tuple):
+        return [_plain_jsonish(item) for item in value]
+    return value
+
+
+def _safe_plain_snapshot(value: Any) -> Any:
+    return _safe_snapshot(_plain_jsonish(value))
+
+
+def _normalize_codex_response_item_status(
+    value: Any,
+    *,
+    default: str = "completed",
+    allowed: Optional[set[str]] = None,
+) -> str:
+    if allowed is None:
+        allowed = {"completed", "incomplete", "in_progress"}
+    if isinstance(value, str):
+        status = value.strip().lower().replace("-", "_").replace(" ", "_")
+        if status in allowed:
+            return status
+    return default
+
+
 def _is_prefix_items(prefix: Any, full: Any) -> bool:
     if not isinstance(prefix, list) or not isinstance(full, list):
         return False
@@ -522,14 +559,123 @@ def _client_incremental_input_items(items: Any) -> List[Any]:
     return [item for item in items if not _is_generated_response_item(item)]
 
 
-def _incremental_input_since_previous_response(previous_input: Any, current_input: Any):
-    if not _is_prefix_items(previous_input, current_input):
+def _codex_websocket_baseline_input(
+    previous_input: Any,
+    response_output_items: Any = None,
+) -> Any:
+    previous_input = _plain_jsonish(previous_input)
+    response_output_items = _plain_jsonish(response_output_items)
+    if not isinstance(previous_input, list):
+        return previous_input
+    if not isinstance(response_output_items, list) or not response_output_items:
+        return previous_input
+    return previous_input + response_output_items
+
+
+def _incremental_input_since_previous_response(
+    previous_input: Any,
+    current_input: Any,
+    response_output_items: Any = None,
+):
+    baseline_input = _codex_websocket_baseline_input(previous_input, response_output_items)
+    current_input = _plain_jsonish(current_input)
+    if not _is_prefix_items(baseline_input, current_input):
         return current_input, False
-    delta = current_input[len(previous_input) :]
+    delta = current_input[len(baseline_input) :]
     return _client_incremental_input_items(delta), True
 
 
+def _codex_websocket_request_fingerprint(payload: Dict[str, Any]) -> Any:
+    return _safe_plain_snapshot({
+        key: value
+        for key, value in payload.items()
+        if key not in {"input", "previous_response_id"}
+    })
+
+
+def _codex_response_output_items(final: SimpleNamespace) -> List[Any]:
+    output = _plain_jsonish(getattr(final, "output", None))
+    if not isinstance(output, list):
+        return []
+    normalized: List[Any] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").strip()
+        if item_type == "message":
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            content_parts = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type") or "").strip()
+                if part_type not in {"output_text", "text"}:
+                    continue
+                text = part.get("text", "")
+                if text is None:
+                    text = ""
+                if not isinstance(text, str):
+                    text = str(text)
+                content_parts.append({"type": "output_text", "text": text})
+            if not content_parts:
+                continue
+            message_item = {
+                "type": "message",
+                "role": "assistant",
+                "status": _normalize_codex_response_item_status(item.get("status")),
+                "content": content_parts,
+            }
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id.strip():
+                message_item["id"] = item_id.strip()
+            phase = item.get("phase")
+            if isinstance(phase, str) and phase.strip():
+                message_item["phase"] = phase.strip()
+            normalized.append(message_item)
+            continue
+        if item_type == "reasoning":
+            encrypted = item.get("encrypted_content")
+            if not isinstance(encrypted, str) or not encrypted:
+                continue
+            reasoning_item = {"type": "reasoning", "encrypted_content": encrypted}
+            summary = item.get("summary")
+            reasoning_item["summary"] = _plain_jsonish(summary) if isinstance(summary, list) else []
+            normalized.append(reasoning_item)
+            continue
+        if item_type == "function_call":
+            status = _normalize_codex_response_item_status(
+                item.get("status"),
+                default="",
+                allowed={"queued", "completed", "incomplete", "in_progress"},
+            )
+            if status in {"queued", "in_progress", "incomplete"}:
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id.strip():
+                continue
+            arguments = item.get("arguments", "{}")
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            elif not isinstance(arguments, str):
+                arguments = str(arguments)
+            normalized.append({
+                "type": "function_call",
+                "call_id": call_id.strip(),
+                "name": name.strip(),
+                "arguments": arguments.strip() or "{}",
+            })
+            continue
+    return normalized
+
+
 class _CodexResponsesWebSocketSession:
+    _MAX_CACHED_CHAINS = 16
+
     def __init__(
         self,
         *,
@@ -544,6 +690,10 @@ class _CodexResponsesWebSocketSession:
         self._context = None
         self.previous_response_id: Optional[str] = None
         self.last_full_input: Any = None
+        self.response_output_items: Any = None
+        self._chains: List[Dict[str, Any]] = []
+        self._pending_chain_index: Optional[int] = None
+        self._pending_request_fingerprint: Any = None
         self.closed = False
 
     def matches(self, *, uri: str, headers: Dict[str, str], open_timeout: float) -> bool:
@@ -595,8 +745,69 @@ class _CodexResponsesWebSocketSession:
         finally:
             self.websocket = None
             self._context = None
+            self._clear_chains()
+
+    def _clear_active_chain(self) -> None:
+        self.previous_response_id = None
+        self.last_full_input = None
+        self.response_output_items = None
+        self._pending_chain_index = None
+        self._pending_request_fingerprint = None
+
+    def _clear_chains(self) -> None:
+        self._chains = []
+        self._clear_active_chain()
+
+    def _set_active_chain(self, chain: Optional[Dict[str, Any]]) -> None:
+        if chain is None:
             self.previous_response_id = None
             self.last_full_input = None
+            self.response_output_items = None
+            return
+        self.previous_response_id = chain.get("previous_response_id")
+        self.last_full_input = _safe_snapshot(chain.get("last_full_input"))
+        self.response_output_items = _safe_snapshot(chain.get("response_output_items"))
+
+    def _ensure_legacy_chain(self) -> None:
+        if self._chains or not self.previous_response_id or self.last_full_input is None:
+            return
+        self._chains.append({
+            "previous_response_id": self.previous_response_id,
+            "last_full_input": _safe_plain_snapshot(self.last_full_input),
+            "response_output_items": _safe_plain_snapshot(self.response_output_items or []),
+            "request_fingerprint": None,
+        })
+
+    def _fingerprint_matches(self, chain: Dict[str, Any], request_fingerprint: Any) -> bool:
+        chain_fingerprint = chain.get("request_fingerprint")
+        return chain_fingerprint is None or chain_fingerprint == request_fingerprint
+
+    def _find_continuation_chain(
+        self,
+        *,
+        current_input: Any,
+        request_fingerprint: Any,
+    ) -> tuple[Optional[int], Optional[Dict[str, Any]], Any]:
+        self._ensure_legacy_chain()
+        for index in range(len(self._chains) - 1, -1, -1):
+            chain = self._chains[index]
+            if not self._fingerprint_matches(chain, request_fingerprint):
+                continue
+            incremental_input, can_continue = _incremental_input_since_previous_response(
+                chain.get("last_full_input"),
+                current_input,
+                chain.get("response_output_items"),
+            )
+            if can_continue:
+                return index, chain, incremental_input
+        return None, None, current_input
+
+    def _drop_pending_chain(self) -> None:
+        if self._pending_chain_index is None:
+            return
+        if 0 <= self._pending_chain_index < len(self._chains):
+            del self._chains[self._pending_chain_index]
+        self._clear_active_chain()
 
     def build_payload(
         self,
@@ -606,29 +817,39 @@ class _CodexResponsesWebSocketSession:
     ) -> tuple[Dict[str, Any], Any, bool]:
         payload = _codex_websocket_response_body(api_kwargs)
         payload["type"] = "response.create"
-        full_input = _safe_snapshot(payload.get("input"))
+        full_input = _safe_plain_snapshot(payload.get("input"))
+        request_fingerprint = _codex_websocket_request_fingerprint(payload)
         used_continuation = False
+        self._pending_chain_index = None
+        self._pending_request_fingerprint = request_fingerprint
 
         if force_full_input:
-            self.previous_response_id = None
-            self.last_full_input = None
+            self._clear_chains()
+            self._pending_request_fingerprint = request_fingerprint
             return payload, full_input, used_continuation
 
-        if self.previous_response_id:
-            incremental_input, can_continue = _incremental_input_since_previous_response(
-                self.last_full_input,
-                payload.get("input"),
-            )
-            if can_continue:
-                payload["previous_response_id"] = self.previous_response_id
-                payload["input"] = incremental_input
-                used_continuation = True
-            else:
-                # The current prompt no longer extends the cached chain
-                # exactly. Start a fresh chain on the same socket with full
-                # input rather than sending an unsafe incremental payload.
-                self.previous_response_id = None
-                self.last_full_input = None
+        chain_index, chain, incremental_input = self._find_continuation_chain(
+            current_input=full_input,
+            request_fingerprint=request_fingerprint,
+        )
+        if chain is not None:
+            self._pending_chain_index = chain_index
+            self._set_active_chain(chain)
+            payload["previous_response_id"] = chain["previous_response_id"]
+            payload["input"] = incremental_input
+            used_continuation = True
+        else:
+            # The current prompt no longer extends any cached chain exactly.
+            # Start a fresh chain on the same socket with full input rather
+            # than sending an unsafe incremental payload.
+            self._set_active_chain(None)
+            if self._chains:
+                logger.debug(
+                    "codex_responses_websocket_event=incremental_chain_miss "
+                    "sending full input because no cached chain matched request "
+                    "(chains=%d).",
+                    len(self._chains),
+                )
 
         return payload, full_input, used_continuation
 
@@ -636,11 +857,25 @@ class _CodexResponsesWebSocketSession:
         status = str(getattr(final, "status", "") or "").strip().lower()
         response_id = getattr(final, "id", None)
         if status in {"failed", "cancelled"} or not isinstance(response_id, str) or not response_id:
-            self.previous_response_id = None
-            self.last_full_input = None
+            self._drop_pending_chain()
             return
-        self.previous_response_id = response_id
-        self.last_full_input = _safe_snapshot(full_input)
+        chain = {
+            "previous_response_id": response_id,
+            "last_full_input": _safe_plain_snapshot(full_input),
+            "response_output_items": _safe_plain_snapshot(_codex_response_output_items(final)),
+            "request_fingerprint": _safe_snapshot(self._pending_request_fingerprint),
+        }
+        if (
+            self._pending_chain_index is not None
+            and 0 <= self._pending_chain_index < len(self._chains)
+        ):
+            del self._chains[self._pending_chain_index]
+        self._chains.append(chain)
+        if len(self._chains) > self._MAX_CACHED_CHAINS:
+            self._chains = self._chains[-self._MAX_CACHED_CHAINS :]
+        self._set_active_chain(chain)
+        self._pending_chain_index = None
+        self._pending_request_fingerprint = None
 
 
 def close_codex_responses_websocket_session(agent) -> None:

@@ -468,6 +468,226 @@ def test_websocket_session_falls_back_to_full_input_when_history_is_not_prefix()
     assert payload["input"] == [{"role": "user", "content": "fresh"}]
 
 
+def test_websocket_session_falls_back_when_non_input_request_fields_change():
+    session = codex_runtime._CodexResponsesWebSocketSession(
+        uri="wss://api.vendor.example.com/v1/responses",
+        headers={"Authorization": "Bearer sk-test"},
+        open_timeout=10,
+    )
+    first_input = [{"role": "user", "content": "Remember alpha"}]
+    _payload, full_input, _used_continuation = session.build_payload(
+        {
+            "model": "gpt-5-codex",
+            "input": first_input,
+            "store": False,
+            "tools": [{"type": "function", "name": "terminal"}],
+        }
+    )
+    session.record_response(
+        SimpleNamespace(
+            id="resp_1",
+            status="completed",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "alpha noted"}],
+                }
+            ],
+        ),
+        full_input,
+    )
+
+    payload, _full_input, used_continuation = session.build_payload(
+        {
+            "model": "gpt-5-codex",
+            "input": [
+                *first_input,
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "alpha noted"}],
+                },
+                {"role": "user", "content": "Repeat it"},
+            ],
+            "store": False,
+            "tools": [{"type": "function", "name": "read_file"}],
+        }
+    )
+
+    assert used_continuation is False
+    assert "previous_response_id" not in payload
+    assert "alpha noted" in json.dumps(payload["input"])
+
+
+def test_websocket_session_requires_previous_response_output_prefix_for_continuation():
+    session = codex_runtime._CodexResponsesWebSocketSession(
+        uri="wss://api.vendor.example.com/v1/responses",
+        headers={"Authorization": "Bearer sk-test"},
+        open_timeout=10,
+    )
+    first_input = [{"role": "user", "content": "Remember alpha"}]
+    _payload, full_input, _used_continuation = session.build_payload(
+        {"model": "gpt-5-codex", "input": first_input, "store": False}
+    )
+    session.record_response(
+        SimpleNamespace(
+            id="resp_1",
+            status="completed",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "alpha noted"}],
+                }
+            ],
+        ),
+        full_input,
+    )
+
+    payload, _full_input, used_continuation = session.build_payload(
+        {
+            "model": "gpt-5-codex",
+            "input": [
+                *first_input,
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "tampered"}],
+                },
+                {"role": "user", "content": "Repeat it"},
+            ],
+            "store": False,
+        }
+    )
+
+    assert used_continuation is False
+    assert "previous_response_id" not in payload
+    assert "tampered" in json.dumps(payload["input"])
+
+
+def test_websocket_session_projects_function_call_output_items_for_next_turn_baseline():
+    session = codex_runtime._CodexResponsesWebSocketSession(
+        uri="wss://api.vendor.example.com/v1/responses",
+        headers={"Authorization": "Bearer sk-test"},
+        open_timeout=10,
+    )
+    first_input = [{"role": "user", "content": "Run pwd"}]
+    _payload, full_input, _used_continuation = session.build_payload(
+        {"model": "gpt-5-codex", "input": first_input, "store": False}
+    )
+    session.record_response(
+        SimpleNamespace(
+            id="resp_1",
+            status="completed",
+            output=[
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "status": "completed",
+                    "call_id": "call_1",
+                    "name": "terminal",
+                    "arguments": "{\"cmd\":\"pwd\"}",
+                }
+            ],
+        ),
+        full_input,
+    )
+
+    payload, _full_input, used_continuation = session.build_payload(
+        {
+            "model": "gpt-5-codex",
+            "input": [
+                *first_input,
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "terminal",
+                    "arguments": "{\"cmd\":\"pwd\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "{\"cwd\":\"/workspace\"}",
+                },
+            ],
+            "store": False,
+        }
+    )
+
+    assert used_continuation is True
+    assert payload["previous_response_id"] == "resp_1"
+    assert payload["input"] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "{\"cwd\":\"/workspace\"}",
+        }
+    ]
+
+
+def test_websocket_session_projects_reasoning_items_for_next_turn_baseline():
+    session = codex_runtime._CodexResponsesWebSocketSession(
+        uri="wss://api.vendor.example.com/v1/responses",
+        headers={"Authorization": "Bearer sk-test"},
+        open_timeout=10,
+    )
+    first_input = [{"role": "user", "content": "Think briefly"}]
+    _payload, full_input, _used_continuation = session.build_payload(
+        {"model": "gpt-5-codex", "input": first_input, "store": False}
+    )
+    session.record_response(
+        SimpleNamespace(
+            id="resp_1",
+            status="completed",
+            output=[
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "encrypted_content": "encrypted-state",
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done"}],
+                },
+            ],
+        ),
+        full_input,
+    )
+
+    payload, _full_input, used_continuation = session.build_payload(
+        {
+            "model": "gpt-5-codex",
+            "input": [
+                *first_input,
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "encrypted-state",
+                    "summary": [],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done"}],
+                },
+                {"role": "user", "content": "Continue"},
+            ],
+            "store": False,
+        }
+    )
+
+    assert used_continuation is True
+    assert payload["previous_response_id"] == "resp_1"
+    assert payload["input"] == [{"role": "user", "content": "Continue"}]
+
+
 def test_websocket_transport_close_with_code_can_fallback_to_http():
     class ConnectionClosedError(Exception):
         code = 1006

@@ -246,6 +246,158 @@ def test_run_conversation_codex_responses_websocket_multi_turn_e2e(monkeypatch):
     assert connection.get("closed") is True
 
 
+class _InterleavedConversationResponsesWebSocket:
+    def __init__(self, connection):
+        self.connection = connection
+        self.events = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.connection["closed"] = True
+        return False
+
+    def close(self):
+        self.connection["closed"] = True
+
+    def send(self, payload):
+        sent = json.loads(payload)
+        call = {
+            "id": f"resp_{len(self.connection['sends']) + 1}",
+            "sent": sent,
+        }
+        self.connection["sends"].append(call)
+        response_text = self._response_for(sent)
+        self.events = [
+            {"type": "response.created", "response": {"id": call["id"], "status": "in_progress"}},
+            {"type": "response.output_text.delta", "delta": response_text},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": response_text}],
+                },
+            },
+            {"type": "response.completed", "response": {"id": call["id"], "status": "completed"}},
+        ]
+
+    def recv(self, timeout=None):
+        if not self.events:
+            raise AssertionError("Hermes consumed past terminal WebSocket event")
+        return json.dumps(self.events.pop(0))
+
+    @staticmethod
+    def _response_for(sent):
+        input_text = json.dumps(sent.get("input", []), ensure_ascii=False)
+        if "Conversation A turn 3" in input_text:
+            return "answer-a3"
+        if "Conversation B turn 2" in input_text:
+            return "answer-b2"
+        if "Conversation A turn 2" in input_text:
+            return "answer-a2"
+        if "Conversation B turn 1" in input_text:
+            return "answer-b1"
+        if "Conversation A turn 1" in input_text:
+            return "answer-a1"
+        return "unexpected"
+
+
+def test_run_conversation_codex_responses_websocket_keeps_incremental_state_per_interleaved_history(
+    monkeypatch,
+):
+    connections = []
+
+    def fake_connect(uri, **kwargs):
+        connection = {
+            "uri": uri,
+            "headers": kwargs.get("additional_headers") or {},
+            "sends": [],
+        }
+        connections.append(connection)
+        return _InterleavedConversationResponsesWebSocket(connection)
+
+    monkeypatch.setattr(codex_runtime, "_connect_responses_websocket", fake_connect)
+
+    agent = _make_codex_responses_ws_agent(
+        "codex-responses-ws-interleaved-histories",
+        max_iterations=2,
+    )
+    agent._create_request_openai_client = (
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("codex_responses WebSocket path must not create an HTTP request client")
+        )
+    )
+
+    history_a = []
+    history_b = []
+
+    a1 = agent.run_conversation(
+        "Conversation A turn 1. Reply answer-a1.",
+        conversation_history=history_a,
+    )
+    history_a = a1["messages"]
+    b1 = agent.run_conversation(
+        "Conversation B turn 1. Reply answer-b1.",
+        conversation_history=history_b,
+    )
+    history_b = b1["messages"]
+    a2 = agent.run_conversation(
+        "Conversation A turn 2. Reply answer-a2.",
+        conversation_history=history_a,
+    )
+    history_a = a2["messages"]
+    b2 = agent.run_conversation(
+        "Conversation B turn 2. Reply answer-b2.",
+        conversation_history=history_b,
+    )
+    history_b = b2["messages"]
+    a3 = agent.run_conversation(
+        "Conversation A turn 3. Reply answer-a3.",
+        conversation_history=history_a,
+    )
+
+    assert [a1["final_response"], b1["final_response"], a2["final_response"]] == [
+        "answer-a1",
+        "answer-b1",
+        "answer-a2",
+    ]
+    assert [b2["final_response"], a3["final_response"]] == ["answer-b2", "answer-a3"]
+
+    assert len(connections) == 1
+    sends = connections[0]["sends"]
+    assert len(sends) == 5
+
+    assert "previous_response_id" not in sends[0]["sent"]
+    assert "previous_response_id" not in sends[1]["sent"]
+    assert sends[2]["sent"]["previous_response_id"] == "resp_1"
+    assert sends[3]["sent"]["previous_response_id"] == "resp_2"
+    assert sends[4]["sent"]["previous_response_id"] == "resp_3"
+
+    second_a_input = json.dumps(sends[2]["sent"]["input"], ensure_ascii=False)
+    second_b_input = json.dumps(sends[3]["sent"]["input"], ensure_ascii=False)
+    third_a_input = json.dumps(sends[4]["sent"]["input"], ensure_ascii=False)
+
+    assert "Conversation A turn 2" in second_a_input
+    assert "Conversation A turn 1" not in second_a_input
+    assert "answer-a1" not in second_a_input
+    assert "Conversation B turn" not in second_a_input
+
+    assert "Conversation B turn 2" in second_b_input
+    assert "Conversation B turn 1" not in second_b_input
+    assert "answer-b1" not in second_b_input
+    assert "Conversation A turn" not in second_b_input
+
+    assert "Conversation A turn 3" in third_a_input
+    assert "Conversation A turn 1" not in third_a_input
+    assert "Conversation A turn 2" not in third_a_input
+    assert "answer-a1" not in third_a_input
+    assert "answer-a2" not in third_a_input
+    assert "Conversation B turn" not in third_a_input
+
+
 class _HermesToolResponsesWebSocket:
     def __init__(self, connection):
         self.connection = connection
