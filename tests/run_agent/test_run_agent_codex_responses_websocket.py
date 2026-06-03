@@ -427,6 +427,14 @@ class _HermesToolResponsesWebSocket:
                 {
                     "type": "response.output_item.done",
                     "item": {
+                        "type": "reasoning",
+                        "id": "rs_1",
+                        "encrypted_content": "encrypted-state",
+                    },
+                },
+                {
+                    "type": "response.output_item.done",
+                    "item": {
                         "type": "function_call",
                         "id": "fc_1",
                         "call_id": "call_1",

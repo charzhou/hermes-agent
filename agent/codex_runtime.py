@@ -597,7 +597,9 @@ def _codex_response_output_items(final: SimpleNamespace) -> List[Any]:
     output = _plain_jsonish(getattr(final, "output", None))
     if not isinstance(output, list):
         return []
-    normalized: List[Any] = []
+    reasoning_items: List[Any] = []
+    message_items: List[Any] = []
+    function_call_items: List[Any] = []
     for item in output:
         if not isinstance(item, dict):
             continue
@@ -633,7 +635,7 @@ def _codex_response_output_items(final: SimpleNamespace) -> List[Any]:
             phase = item.get("phase")
             if isinstance(phase, str) and phase.strip():
                 message_item["phase"] = phase.strip()
-            normalized.append(message_item)
+            message_items.append(message_item)
             continue
         if item_type == "reasoning":
             encrypted = item.get("encrypted_content")
@@ -642,7 +644,7 @@ def _codex_response_output_items(final: SimpleNamespace) -> List[Any]:
             reasoning_item = {"type": "reasoning", "encrypted_content": encrypted}
             summary = item.get("summary")
             reasoning_item["summary"] = _plain_jsonish(summary) if isinstance(summary, list) else []
-            normalized.append(reasoning_item)
+            reasoning_items.append(reasoning_item)
             continue
         if item_type == "function_call":
             status = _normalize_codex_response_item_status(
@@ -663,13 +665,22 @@ def _codex_response_output_items(final: SimpleNamespace) -> List[Any]:
                 arguments = json.dumps(arguments, ensure_ascii=False)
             elif not isinstance(arguments, str):
                 arguments = str(arguments)
-            normalized.append({
+            function_call_items.append({
                 "type": "function_call",
                 "call_id": call_id.strip(),
                 "name": name.strip(),
                 "arguments": arguments.strip() or "{}",
             })
             continue
+    # Mirror _chat_messages_to_responses_input(): replay reasoning first,
+    # then assistant content/sentinel, then tool calls. The WebSocket prefix
+    # matcher must see the same sequence the next turn's adapter will emit.
+    normalized: List[Any] = []
+    normalized.extend(reasoning_items)
+    normalized.extend(message_items)
+    if reasoning_items and not message_items:
+        normalized.append({"role": "assistant", "content": ""})
+    normalized.extend(function_call_items)
     return normalized
 
 
