@@ -688,6 +688,77 @@ def test_websocket_session_projects_reasoning_items_for_next_turn_baseline():
     assert payload["input"] == [{"role": "user", "content": "Continue"}]
 
 
+def test_websocket_session_projects_reasoning_tool_call_sentinel_for_next_turn_baseline():
+    session = codex_runtime._CodexResponsesWebSocketSession(
+        uri="wss://api.vendor.example.com/v1/responses",
+        headers={"Authorization": "Bearer sk-test"},
+        open_timeout=10,
+    )
+    first_input = [{"role": "user", "content": "Run pwd after thinking"}]
+    _payload, full_input, _used_continuation = session.build_payload(
+        {"model": "gpt-5-codex", "input": first_input, "store": False}
+    )
+    session.record_response(
+        SimpleNamespace(
+            id="resp_1",
+            status="completed",
+            output=[
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "encrypted_content": "encrypted-state",
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "status": "completed",
+                    "call_id": "call_1",
+                    "name": "terminal",
+                    "arguments": "{\"cmd\":\"pwd\"}",
+                },
+            ],
+        ),
+        full_input,
+    )
+
+    payload, _full_input, used_continuation = session.build_payload(
+        {
+            "model": "gpt-5-codex",
+            "input": [
+                *first_input,
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "encrypted-state",
+                    "summary": [],
+                },
+                {"role": "assistant", "content": ""},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "terminal",
+                    "arguments": "{\"cmd\":\"pwd\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "{\"cwd\":\"/workspace\"}",
+                },
+            ],
+            "store": False,
+        }
+    )
+
+    assert used_continuation is True
+    assert payload["previous_response_id"] == "resp_1"
+    assert payload["input"] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "{\"cwd\":\"/workspace\"}",
+        }
+    ]
+
+
 def test_websocket_transport_close_with_code_can_fallback_to_http():
     class ConnectionClosedError(Exception):
         code = 1006
