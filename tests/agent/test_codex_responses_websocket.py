@@ -434,6 +434,89 @@ def test_websocket_captures_and_replays_turn_state_on_same_turn_reconnect(monkey
     )
 
 
+def test_websocket_turn_state_header_does_not_recreate_open_session(monkeypatch):
+    first_output = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "first"}],
+    }
+    first_ws = _FakeWebSocket(
+        [
+            {"type": "response.output_item.done", "item": first_output},
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_1", "status": "completed"},
+            },
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "second"}],
+                },
+            },
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_2", "status": "completed"},
+            },
+        ],
+        response_headers={"x-codex-turn-state": "sticky-turn-token"},
+        state_name="OPEN",
+    )
+    second_ws = _FakeWebSocket([])
+    sockets = [first_ws, second_ws]
+    connect_calls = []
+
+    def fake_connect(uri, **kwargs):
+        connect_calls.append({"uri": uri, **kwargs})
+        return sockets.pop(0)
+
+    monkeypatch.setattr(codex_runtime, "codex_responses_websocket_enabled", lambda agent: True)
+    monkeypatch.setattr(codex_runtime, "_connect_responses_websocket", fake_connect, raising=False)
+
+    agent = SimpleNamespace(
+        api_mode="codex_responses",
+        provider="vendor",
+        base_url="https://api.vendor.example.com/v1",
+        api_key="sk-test",
+        session_id="hermes-session-123",
+        _thread_id="hermes-thread-456",
+        _interrupt_requested=False,
+        _fire_stream_delta=lambda text: None,
+        _fire_reasoning_delta=lambda text: None,
+        _touch_activity=lambda text: None,
+        _client_log_context=lambda: "test-context",
+    )
+    api_kwargs = {
+        "model": "gpt-5-codex",
+        "instructions": "You are Hermes.",
+        "input": [{"role": "user", "content": "Ping"}],
+        "store": False,
+        "stream": True,
+    }
+
+    codex_runtime.run_codex_stream(agent, api_kwargs)
+    codex_runtime.run_codex_stream(
+        agent,
+        {
+            **api_kwargs,
+            "extra_headers": {"x-codex-turn-state": "sticky-turn-token"},
+            "input": [
+                {"role": "user", "content": "Ping"},
+                first_output,
+                {"role": "user", "content": "Again"},
+            ],
+        },
+    )
+
+    assert len(connect_calls) == 1
+    assert first_ws.sent_payloads[1]["previous_response_id"] == "resp_1"
+    assert first_ws.sent_payloads[1]["input"] == [{"role": "user", "content": "Again"}]
+    assert second_ws.sent_payloads == []
+
+
 def test_websocket_turn_state_resets_at_conversation_turn_boundary():
     agent = SimpleNamespace(
         _codex_responses_websocket_output_committed=True,
