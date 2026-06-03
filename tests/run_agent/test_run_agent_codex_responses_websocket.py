@@ -15,6 +15,10 @@ import run_agent
 from agent import codex_runtime
 
 
+class ConnectionClosedError(Exception):
+    pass
+
+
 @pytest.fixture(autouse=True)
 def _isolated_hermes_home(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
@@ -127,6 +131,7 @@ def test_run_conversation_codex_responses_websocket_multi_turn_e2e(monkeypatch):
         connection = {
             "uri": uri,
             "headers": kwargs.get("additional_headers") or {},
+            "user_agent_header": kwargs.get("user_agent_header"),
             "sends": [],
         }
         connections.append(connection)
@@ -213,6 +218,7 @@ def test_run_conversation_codex_responses_websocket_multi_turn_e2e(monkeypatch):
         connection["headers"].get("x-client-request-id")
         == "codex-responses-ws-thread-e2e"
     )
+    assert connection["user_agent_header"].startswith("HermesAgent/")
 
     sends = connection["sends"]
     assert len(sends) == 3
@@ -703,7 +709,7 @@ class _PartialThenFailResponsesWebSocket:
     def recv(self, timeout=None):
         if self.events:
             return json.dumps(self.events.pop(0))
-        raise ConnectionError("websocket failed after committed text")
+        raise ConnectionClosedError("websocket closed before response.completed")
 
 
 def test_run_conversation_codex_responses_websocket_does_not_http_fallback_after_committed_text(
@@ -1255,3 +1261,103 @@ def test_run_conversation_codex_responses_websocket_reopens_stale_socket_before_
     assert "codex_responses_websocket_event=restore_full_input" in caplog.text
     assert "continuation_reopen_before_http_fallback" not in caplog.text
     assert "stale websocket send failed" in caplog.text
+
+
+class _StateAwareResponsesWebSocket:
+    def __init__(self, connection):
+        self.connection = connection
+        self.connection["socket"] = self
+        self.events = []
+        self.state = SimpleNamespace(name="OPEN")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def close(self):
+        self.connection["closed"] = True
+        self.state = SimpleNamespace(name="CLOSED")
+
+    def send(self, payload):
+        if getattr(self.state, "name", None) != "OPEN":
+            self.connection.setdefault("stale_send_attempts", 0)
+            self.connection["stale_send_attempts"] += 1
+            raise ConnectionClosedError("websocket is already closed")
+
+        sent = json.loads(payload)
+        response_id = f"{self.connection['name']}_resp_{len(self.connection['sends']) + 1}"
+        self.connection["sends"].append({"id": response_id, "sent": sent})
+        input_text = json.dumps(sent.get("input", []), ensure_ascii=False)
+        response_text = "state-second-ok" if "Second state turn" in input_text else "state-first-ok"
+        self.events = [
+            {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
+            {"type": "response.output_text.delta", "delta": response_text},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": response_text}],
+                },
+            },
+            {"type": "response.completed", "response": {"id": response_id, "status": "completed"}},
+        ]
+
+    def recv(self, timeout=None):
+        if not self.events:
+            raise AssertionError("Hermes consumed past terminal WebSocket event")
+        return json.dumps(self.events.pop(0))
+
+
+def test_run_conversation_codex_responses_websocket_reopens_when_cached_socket_state_is_closed(
+    monkeypatch,
+):
+    connections = []
+
+    def fake_connect(uri, **kwargs):
+        connection = {
+            "name": f"state-conn{len(connections) + 1}",
+            "uri": uri,
+            "headers": kwargs.get("additional_headers") or {},
+            "sends": [],
+        }
+        connections.append(connection)
+        return _StateAwareResponsesWebSocket(connection)
+
+    monkeypatch.setattr(codex_runtime, "_connect_responses_websocket", fake_connect)
+
+    agent = _make_codex_responses_ws_agent("codex-responses-ws-state-reopen", max_iterations=2)
+    agent._create_request_openai_client = (
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("closed cached WebSocket should reopen before HTTP fallback")
+        )
+    )
+
+    first = agent.run_conversation("First state turn. Reply state-first-ok.")
+    assert first["completed"] is True
+    assert first["final_response"] == "state-first-ok"
+
+    connections[0]["socket"].state = SimpleNamespace(name="CLOSED")
+
+    second = agent.run_conversation(
+        "Second state turn. Reply state-second-ok.",
+        conversation_history=first["messages"],
+    )
+
+    assert second["completed"] is True
+    assert second["final_response"] == "state-second-ok"
+    assert len(connections) == 2
+    assert len(connections[0]["sends"]) == 1
+    assert connections[0].get("stale_send_attempts", 0) == 0
+    assert connections[0].get("closed") is True
+
+    reopened_payload = connections[1]["sends"][0]["sent"]
+    reopened_input = json.dumps(reopened_payload["input"], ensure_ascii=False)
+    assert "previous_response_id" not in reopened_payload
+    assert "First state turn" in reopened_input
+    assert "state-first-ok" in reopened_input
+    assert "Second state turn" in reopened_input

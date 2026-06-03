@@ -464,6 +464,33 @@ def _connect_responses_websocket(uri: str, **kwargs):
     return connect(uri, **kwargs)
 
 
+def _codex_websocket_user_agent_header(headers: Dict[str, str]) -> Optional[str]:
+    if any(str(key).lower() == "user-agent" for key in headers):
+        return None
+    try:
+        from hermes_cli import __version__ as hermes_version
+    except Exception:
+        hermes_version = "unknown"
+    return f"HermesAgent/{hermes_version}"
+
+
+def _websocket_state_name(websocket: Any) -> Optional[str]:
+    state = getattr(websocket, "state", None)
+    if state is None:
+        return None
+    name = getattr(state, "name", None)
+    if isinstance(name, str):
+        return name.upper()
+    if isinstance(state, str):
+        return state.upper()
+    return None
+
+
+def _websocket_is_open(websocket: Any) -> bool:
+    state_name = _websocket_state_name(websocket)
+    return state_name is None or state_name == "OPEN"
+
+
 def _safe_snapshot(value: Any) -> Any:
     try:
         return deepcopy(value)
@@ -529,10 +556,19 @@ class _CodexResponsesWebSocketSession:
 
     def open(self):
         if self.websocket is not None and not self.closed:
-            return self.websocket
+            if _websocket_is_open(self.websocket):
+                return self.websocket
+            logger.info(
+                "codex_responses_websocket_event=cached_connection_closed "
+                "Codex Responses WebSocket cached connection is no longer open; reconnecting "
+                "with full input (state=%s).",
+                _websocket_state_name(self.websocket) or "unknown",
+            )
+            self.close()
         raw = _connect_responses_websocket(
             self.uri,
             additional_headers=self.headers,
+            user_agent_header=_codex_websocket_user_agent_header(self.headers),
             open_timeout=self.open_timeout,
             close_timeout=10,
             max_size=None,
@@ -779,7 +815,9 @@ def _iter_codex_websocket_events(
             continue
         except Exception as exc:
             if exc.__class__.__name__.startswith("ConnectionClosed"):
-                break
+                raise ConnectionError(
+                    f"websocket closed before response.completed: {exc}"
+                ) from exc
             raise
 
         if isinstance(raw, bytes):
@@ -834,12 +872,12 @@ def run_codex_websocket(
     ) -> tuple[SimpleNamespace, bool]:
         agent._codex_responses_websocket_output_committed = False
         send_state["used_continuation"] = False
+        websocket = active_session.open()
         payload, full_input, used_continuation = active_session.build_payload(
             api_kwargs,
             force_full_input=force_full,
         )
         send_state["used_continuation"] = used_continuation
-        websocket = active_session.open()
         websocket.send(json.dumps(payload))
 
         def _on_event_with_commit(event: Any) -> None:
