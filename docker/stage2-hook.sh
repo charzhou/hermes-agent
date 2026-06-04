@@ -85,11 +85,12 @@ fi
 # is a no-op if the dir already exists. (#18482, salvages #18488)
 mkdir -p "$HERMES_HOME"
 
-# Numeric UID/GID validation: must be digits only, 1000-65534
+# Numeric UID/GID validation: must be digits only, non-root, 1-65534.
+# NAS hosts such as Unraid commonly use low non-root IDs (99:100).
 validate_uid_gid() {
     case "$1" in
         ''|*[!0-9]*) return 1 ;;
-        *) [ "$1" -ge 1000 ] && [ "$1" -le 65534 ] ;;
+        *) [ "$1" -ge 1 ] && [ "$1" -le 65534 ] ;;
     esac
 }
 
@@ -198,7 +199,7 @@ if [ "$needs_chown" = true ]; then
     # Hermes-owned subdirs: recursive chown is safe here because these are
     # created and managed exclusively by hermes (see the s6-setuidgid mkdir
     # -p block below for the canonical list).
-    for sub in cron sessions logs hooks memories skills skins plans workspace home profiles; do
+    for sub in cron sessions logs hooks memories skills skins plans workspace home profiles pairing platforms/pairing; do
         if [ -e "$HERMES_HOME/$sub" ]; then
             chown -R hermes:hermes "$HERMES_HOME/$sub" 2>/dev/null || \
                 echo "[stage2] Warning: chown $HERMES_HOME/$sub failed (rootless container?) — continuing"
@@ -308,7 +309,9 @@ as_hermes mkdir -p \
     "$HERMES_HOME/skins" \
     "$HERMES_HOME/plans" \
     "$HERMES_HOME/workspace" \
-    "$HERMES_HOME/home"
+    "$HERMES_HOME/home" \
+    "$HERMES_HOME/pairing" \
+    "$HERMES_HOME/platforms/pairing"
 
 # --- Install-method stamp (read by detect_install_method() in hermes status) ---
 # Preserved from the tini-era entrypoint (PR #27843). Must be written as
@@ -336,6 +339,17 @@ seed_one "SOUL.md" "docker/SOUL.md"
 if [ -f "$HERMES_HOME/.env" ]; then
     chown hermes:hermes "$HERMES_HOME/.env" 2>/dev/null || true
     chmod 600 "$HERMES_HOME/.env" 2>/dev/null || true
+fi
+
+# --- Migrate persisted config schema ---
+# Docker image upgrades replace the code under $INSTALL_DIR but preserve
+# $HERMES_HOME on the mounted volume. Run the same safe, non-interactive
+# config-schema migrations that `hermes update` runs for non-Docker installs,
+# after first-boot seeding and before supervised gateway services start.
+# Set HERMES_SKIP_CONFIG_MIGRATION=1 for controlled/manual migrations.
+if [ -f "$HERMES_HOME/config.yaml" ]; then
+    s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/docker_config_migrate.py" \
+        || echo "[stage2] Warning: docker_config_migrate.py failed; continuing"
 fi
 
 # auth.json: bootstrap from env on first boot only. Same semantics as the
