@@ -214,6 +214,13 @@ def test_run_conversation_codex_responses_websocket_multi_turn_e2e(monkeypatch):
     assert connection["headers"].get("Authorization") == "Bearer sk-test"
     assert connection["headers"].get("session-id") == "codex-responses-ws-e2e"
     assert connection["headers"].get("thread-id") == "codex-responses-ws-thread-e2e"
+    assert connection["headers"].get("x-codex-window-id") == "codex-responses-ws-thread-e2e:0"
+    handshake_metadata = json.loads(connection["headers"]["x-codex-turn-metadata"])
+    assert handshake_metadata["request_kind"] == "turn"
+    assert handshake_metadata["session_id"] == "codex-responses-ws-e2e"
+    assert handshake_metadata["thread_id"] == "codex-responses-ws-thread-e2e"
+    assert handshake_metadata["window_id"] == "codex-responses-ws-thread-e2e:0"
+    assert handshake_metadata["model"] == "gpt-5.4"
     assert (
         connection["headers"].get("x-client-request-id")
         == "codex-responses-ws-thread-e2e"
@@ -225,6 +232,20 @@ def test_run_conversation_codex_responses_websocket_multi_turn_e2e(monkeypatch):
     assert all(call["sent"]["type"] == "response.create" for call in sends)
     assert all("stream" not in call["sent"] for call in sends)
     assert all("background" not in call["sent"] for call in sends)
+    metadata_by_turn = [
+        json.loads(call["sent"]["client_metadata"]["x-codex-turn-metadata"])
+        for call in sends
+    ]
+    assert all(
+        metadata["window_id"] == "codex-responses-ws-thread-e2e:0"
+        for metadata in metadata_by_turn
+    )
+    assert len({metadata["turn_id"] for metadata in metadata_by_turn}) == 3
+    assert all(
+        call["sent"]["client_metadata"]["x-codex-window-id"]
+        == "codex-responses-ws-thread-e2e:0"
+        for call in sends
+    )
 
     assert "previous_response_id" not in sends[0]["sent"]
     assert sends[1]["sent"]["previous_response_id"] == "resp_1"

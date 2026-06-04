@@ -21,6 +21,7 @@ import logging
 import json
 import os
 import time
+import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -229,6 +230,9 @@ _RESPONSES_WEBSOCKETS_BETA_VALUE = "responses_websockets=2026-02-06"
 _WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached"
 _WEBSOCKET_ERROR_MARKER = "_hermes_codex_responses_websocket_error"
 _CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
+_CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
+_CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
+_CODEX_WS_STREAM_REQUEST_START_MS_KEY = "x-codex-ws-stream-request-start-ms"
 
 _WEBSOCKET_BODY_EXCLUDED_KEYS = frozenset({
     "timeout",
@@ -493,6 +497,48 @@ def _codex_responses_session_header_values(agent) -> tuple[str, str]:
     return session_id, thread_id
 
 
+def _codex_responses_window_id(agent) -> str:
+    _session_id, thread_id = _codex_responses_session_header_values(agent)
+    if not thread_id:
+        return ""
+    generation = getattr(agent, "_codex_responses_window_generation", 0)
+    try:
+        generation_int = int(generation)
+    except (TypeError, ValueError):
+        generation_int = 0
+    return f"{thread_id}:{generation_int}"
+
+
+def _codex_responses_turn_metadata_header(agent, api_kwargs: Dict[str, Any]) -> str:
+    cached = getattr(agent, "_codex_responses_websocket_turn_metadata_header", None)
+    if isinstance(cached, str) and cached.strip():
+        return cached.strip()
+
+    session_id, thread_id = _codex_responses_session_header_values(agent)
+    window_id = _codex_responses_window_id(agent)
+    turn_id = str(getattr(agent, "_current_turn_id", "") or "").strip()
+    if not turn_id:
+        turn_id = f"turn_{uuid.uuid4().hex}"
+    metadata: Dict[str, Any] = {
+        "request_kind": "turn",
+        "turn_id": turn_id,
+        "turn_started_at_unix_ms": int(time.time() * 1000),
+    }
+    if session_id:
+        metadata["session_id"] = session_id
+    if thread_id:
+        metadata["thread_id"] = thread_id
+    if window_id:
+        metadata["window_id"] = window_id
+    model = str(api_kwargs.get("model") or "").strip()
+    if model:
+        metadata["model"] = model
+
+    header = json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
+    agent._codex_responses_websocket_turn_metadata_header = header
+    return header
+
+
 def _codex_websocket_headers(agent, api_kwargs: Dict[str, Any]) -> Dict[str, str]:
     headers: Dict[str, str] = {}
     extra_headers = api_kwargs.get("extra_headers")
@@ -510,6 +556,12 @@ def _codex_websocket_headers(agent, api_kwargs: Dict[str, Any]) -> Dict[str, str
     _set_header_if_missing(headers, "session-id", session_id)
     _set_header_if_missing(headers, "thread-id", thread_id)
     _set_header_if_missing(headers, "x-client-request-id", thread_id)
+    _set_header_if_missing(headers, _CODEX_WINDOW_ID_HEADER, _codex_responses_window_id(agent))
+    _set_header_if_missing(
+        headers,
+        _CODEX_TURN_METADATA_HEADER,
+        _codex_responses_turn_metadata_header(agent, api_kwargs),
+    )
 
     beta_key = next((key for key in headers if key.lower() == "openai-beta"), "OpenAI-Beta")
     beta_values = [
@@ -526,6 +578,54 @@ def _codex_websocket_headers(agent, api_kwargs: Dict[str, Any]) -> Dict[str, str
     if api_key and not has_authorization:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+def _codex_websocket_add_client_metadata(
+    payload: Dict[str, Any],
+    headers: Dict[str, str],
+) -> None:
+    client_metadata = payload.get("client_metadata")
+    if not isinstance(client_metadata, dict):
+        client_metadata = {}
+        payload["client_metadata"] = client_metadata
+    window_id = _headers_get_case_insensitive(headers, _CODEX_WINDOW_ID_HEADER)
+    if window_id:
+        client_metadata.setdefault(_CODEX_WINDOW_ID_HEADER, window_id)
+    turn_metadata = _headers_get_case_insensitive(headers, _CODEX_TURN_METADATA_HEADER)
+    if turn_metadata:
+        client_metadata.setdefault(_CODEX_TURN_METADATA_HEADER, turn_metadata)
+    client_metadata[_CODEX_WS_STREAM_REQUEST_START_MS_KEY] = str(int(time.time() * 1000))
+
+
+def _codex_websocket_idle_timeout(api_kwargs: Dict[str, Any]) -> float:
+    raw_env = os.getenv("HERMES_CODEX_WEBSOCKET_IDLE_TIMEOUT_SECONDS")
+    if raw_env is None:
+        raw_env = os.getenv("HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS")
+    if raw_env is not None:
+        try:
+            value = float(raw_env)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    timeout = api_kwargs.get("timeout")
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
+        return float(timeout)
+    return 120.0
+
+
+def _codex_websocket_input_item_count(payload: Dict[str, Any]) -> int:
+    input_items = payload.get("input")
+    if isinstance(input_items, list):
+        return len(input_items)
+    return 0
+
+
+def _codex_websocket_session_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    stable_headers = dict(headers)
+    _pop_header_case_insensitive(stable_headers, _CODEX_TURN_STATE_HEADER)
+    _pop_header_case_insensitive(stable_headers, _CODEX_TURN_METADATA_HEADER)
+    return stable_headers
 
 
 def _connect_responses_websocket(uri: str, **kwargs):
@@ -782,6 +882,7 @@ class _CodexResponsesWebSocketSession:
         self._on_turn_state = on_turn_state or (lambda value: None)
         self.websocket = None
         self._context = None
+        self._dynamic_headers: Dict[str, str] = {}
         self.previous_response_id: Optional[str] = None
         self.last_full_input: Any = None
         self.response_output_items: Any = None
@@ -798,6 +899,13 @@ class _CodexResponsesWebSocketSession:
             and self.open_timeout == open_timeout
         )
 
+    def set_dynamic_headers(self, headers: Dict[str, str]) -> None:
+        self._dynamic_headers = {
+            str(key): str(value)
+            for key, value in headers.items()
+            if key and value is not None
+        }
+
     def open(self):
         if self.websocket is not None and not self.closed:
             if _websocket_is_open(self.websocket):
@@ -810,6 +918,16 @@ class _CodexResponsesWebSocketSession:
             )
             self.close()
         connect_headers = dict(self.headers)
+        turn_metadata = _headers_get_case_insensitive(
+            self._dynamic_headers,
+            _CODEX_TURN_METADATA_HEADER,
+        )
+        if turn_metadata:
+            _set_header_if_missing(
+                connect_headers,
+                _CODEX_TURN_METADATA_HEADER,
+                turn_metadata,
+            )
         turn_state = str(self._turn_state_supplier() or "").strip()
         if turn_state:
             _set_header_if_missing(connect_headers, _CODEX_TURN_STATE_HEADER, turn_state)
@@ -822,6 +940,8 @@ class _CodexResponsesWebSocketSession:
             additional_headers=connect_headers,
             user_agent_header=_codex_websocket_user_agent_header(connect_headers),
             open_timeout=self.open_timeout,
+            ping_interval=None,
+            ping_timeout=None,
             close_timeout=10,
             max_size=None,
         )
@@ -1000,6 +1120,7 @@ def reset_codex_responses_websocket_turn_fallback(agent) -> None:
     """Reset per-turn stream state while preserving session-scoped HTTP fallback."""
     agent._codex_responses_websocket_output_committed = False
     agent._codex_responses_websocket_turn_state = None
+    agent._codex_responses_websocket_turn_metadata_header = None
 
 
 def mark_codex_responses_websocket_error(exc: BaseException) -> None:
@@ -1135,22 +1256,25 @@ def _get_codex_responses_websocket_session(
     headers: Dict[str, str],
     open_timeout: float,
 ) -> _CodexResponsesWebSocketSession:
+    stable_headers = _codex_websocket_session_headers(headers)
     session = getattr(agent, "_codex_responses_websocket_session", None)
     if isinstance(session, _CodexResponsesWebSocketSession) and session.matches(
         uri=uri,
-        headers=headers,
+        headers=stable_headers,
         open_timeout=open_timeout,
     ):
+        session.set_dynamic_headers(headers)
         return session
 
     close_codex_responses_websocket_session(agent)
     session = _CodexResponsesWebSocketSession(
         uri=uri,
-        headers=headers,
+        headers=stable_headers,
         open_timeout=open_timeout,
         turn_state_supplier=lambda: _codex_responses_turn_state(agent),
         on_turn_state=lambda value: _set_codex_responses_turn_state(agent, value),
     )
+    session.set_dynamic_headers(headers)
     agent._codex_responses_websocket_session = session
     return session
 
@@ -1160,13 +1284,23 @@ def _iter_codex_websocket_events(
     *,
     interrupt_check=None,
     recv_timeout: Optional[float] = 1.0,
+    idle_timeout: Optional[float] = None,
 ):
+    last_event_at = time.monotonic()
     while True:
         if interrupt_check is not None and interrupt_check():
             break
         try:
             raw = websocket.recv(timeout=recv_timeout)
         except TimeoutError:
+            if (
+                idle_timeout is not None
+                and idle_timeout >= 0
+                and time.monotonic() - last_event_at >= idle_timeout
+            ):
+                raise TimeoutError(
+                    f"websocket idle timeout waiting for response event ({idle_timeout:.0f}s)"
+                )
             continue
         except Exception as exc:
             if exc.__class__.__name__.startswith("ConnectionClosed"):
@@ -1177,6 +1311,7 @@ def _iter_codex_websocket_events(
 
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
+        last_event_at = time.monotonic()
         event = json.loads(raw)
         event_type = event.get("type") if isinstance(event, dict) else None
         yield _json_to_namespace(event)
@@ -1233,6 +1368,21 @@ def run_codex_websocket(
             api_kwargs,
             force_full_input=force_full,
         )
+        _codex_websocket_add_client_metadata(payload, headers)
+        idle_timeout = _codex_websocket_idle_timeout(api_kwargs)
+        logger.info(
+            "codex_responses_websocket_event=request_prepared "
+            "Codex Responses WebSocket request prepared "
+            "(has_window_id=%s has_turn_metadata=%s used_continuation=%s "
+            "force_full_input=%s input_items=%d idle_timeout=%.0f). %s",
+            bool(_headers_get_case_insensitive(headers, _CODEX_WINDOW_ID_HEADER)),
+            bool(_headers_get_case_insensitive(headers, _CODEX_TURN_METADATA_HEADER)),
+            used_continuation,
+            force_full,
+            _codex_websocket_input_item_count(payload),
+            idle_timeout,
+            getattr(agent, "_client_log_context", lambda: "")(),
+        )
         send_state["used_continuation"] = used_continuation
         websocket.send(json.dumps(payload))
 
@@ -1241,6 +1391,7 @@ def run_codex_websocket(
                 websocket,
                 interrupt_check=interrupt_check,
                 recv_timeout=1.0,
+                idle_timeout=idle_timeout,
             ),
             model=api_kwargs.get("model"),
             on_text_delta=on_text_delta,

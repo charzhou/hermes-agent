@@ -686,6 +686,20 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         )
         is_xai_responses = agent.provider in {"xai", "xai-oauth"} or agent._base_url_hostname == "api.x.ai"
         _msgs_for_codex = agent._prepare_messages_for_non_vision_model(api_messages)
+        codex_window_id = None
+        codex_turn_metadata = None
+        try:
+            from agent.codex_runtime import (
+                _codex_responses_turn_metadata_header,
+                _codex_responses_window_id,
+            )
+            codex_window_id = _codex_responses_window_id(agent)
+            codex_turn_metadata = _codex_responses_turn_metadata_header(
+                agent,
+                {"model": agent.model},
+            )
+        except Exception:
+            logger.debug("Failed to build Codex Responses turn metadata", exc_info=True)
 
         # xAI's /responses endpoint rejects ``pattern`` and ``format`` keywords
         # in tool schemas (HTTP 400 "Invalid arguments passed to the model").
@@ -727,6 +741,8 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             session_id=getattr(agent, "session_id", None),
             thread_id=getattr(agent, "_thread_id", None),
             codex_turn_state=getattr(agent, "_codex_responses_websocket_turn_state", None),
+            codex_window_id=codex_window_id,
+            codex_turn_metadata=codex_turn_metadata,
             max_tokens=agent.max_tokens,
             timeout=agent._resolved_api_call_timeout(),
             request_overrides=agent.request_overrides,

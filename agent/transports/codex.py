@@ -5,6 +5,9 @@ This transport owns format conversion and normalization — NOT client lifecycle
 streaming, or the _run_codex_stream() call path.
 """
 
+import json
+import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 from agent.transports.base import ProviderTransport
@@ -12,6 +15,8 @@ from agent.transports.types import NormalizedResponse, ToolCall
 
 
 _CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
+_CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
+_CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
 
 
 def _header_present(headers: Dict[str, str], name: str) -> bool:
@@ -41,6 +46,34 @@ def _merge_extra_headers_if_missing(kwargs: Dict[str, Any], headers_to_add: Dict
         _set_header_if_missing(merged_extra_headers, name, value)
     if merged_extra_headers:
         kwargs["extra_headers"] = merged_extra_headers
+
+
+def _codex_window_id(thread_id: str) -> str:
+    thread_id = str(thread_id or "").strip()
+    return f"{thread_id}:0" if thread_id else ""
+
+
+def _codex_turn_metadata(
+    *,
+    model: str,
+    session_id: str,
+    thread_id: str,
+    window_id: str,
+) -> str:
+    metadata: Dict[str, Any] = {
+        "request_kind": "turn",
+        "turn_id": f"turn_{uuid.uuid4().hex}",
+        "turn_started_at_unix_ms": int(time.time() * 1000),
+    }
+    if session_id:
+        metadata["session_id"] = session_id
+    if thread_id:
+        metadata["thread_id"] = thread_id
+    if window_id:
+        metadata["window_id"] = window_id
+    if model:
+        metadata["model"] = model
+    return json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
 
 
 class ResponsesApiTransport(ProviderTransport):
@@ -106,6 +139,8 @@ class ResponsesApiTransport(ProviderTransport):
             session_id: str | None — used for prompt_cache_key + session headers
             thread_id: str | None — used for Codex session affinity headers
             codex_turn_state: str | None — same-turn sticky routing token
+            codex_window_id: str | None — Codex window affinity header
+            codex_turn_metadata: str | None — stable per-turn Codex metadata header
             max_tokens: int | None — max_output_tokens
             timeout: float | None — per-request timeout forwarded to the SDK
             request_overrides: dict | None — extra kwargs merged in
@@ -253,12 +288,24 @@ class ResponsesApiTransport(ProviderTransport):
 
         if session_id and not is_xai_responses:
             thread_id = str(params.get("thread_id") or session_id).strip()
+            window_id = str(params.get("codex_window_id") or _codex_window_id(thread_id)).strip()
+            turn_metadata = str(
+                params.get("codex_turn_metadata")
+                or _codex_turn_metadata(
+                    model=model,
+                    session_id=str(session_id or "").strip(),
+                    thread_id=thread_id,
+                    window_id=window_id,
+                )
+            ).strip()
             _merge_extra_headers_if_missing(
                 kwargs,
                 {
                     "session-id": session_id,
                     "thread-id": thread_id,
                     "x-client-request-id": thread_id,
+                    _CODEX_WINDOW_ID_HEADER: window_id,
+                    _CODEX_TURN_METADATA_HEADER: turn_metadata,
                     _CODEX_TURN_STATE_HEADER: params.get("codex_turn_state"),
                 },
             )

@@ -105,6 +105,15 @@ class TestCodexBuildKwargs:
         assert headers["session-id"] == "test-session-123"
         assert headers["thread-id"] == "test-thread-456"
         assert headers["x-client-request-id"] == "test-thread-456"
+        assert headers["x-codex-window-id"] == "test-thread-456:0"
+        metadata = json.loads(headers["x-codex-turn-metadata"])
+        assert metadata["request_kind"] == "turn"
+        assert metadata["session_id"] == "test-session-123"
+        assert metadata["thread_id"] == "test-thread-456"
+        assert metadata["window_id"] == "test-thread-456:0"
+        assert metadata["model"] == "gpt-5.4"
+        assert metadata["turn_id"]
+        assert isinstance(metadata["turn_started_at_unix_ms"], int)
 
     def test_codex_session_headers_preserve_request_overrides(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
@@ -129,6 +138,10 @@ class TestCodexBuildKwargs:
         assert headers["Thread-ID"] == "explicit-thread"
         assert headers["X-Client-Request-ID"] == "explicit-request"
         assert headers["X-Trace"] == "abc"
+        assert headers["x-codex-window-id"] == "derived-thread:0"
+        metadata = json.loads(headers["x-codex-turn-metadata"])
+        assert metadata["session_id"] == "derived-session"
+        assert metadata["thread_id"] == "derived-thread"
         assert "session-id" not in headers
         assert "thread-id" not in headers
         assert "x-client-request-id" not in headers

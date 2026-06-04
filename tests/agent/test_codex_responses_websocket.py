@@ -90,6 +90,48 @@ def test_codex_websocket_headers_include_codex_session_affinity_headers():
     assert headers["x-client-request-id"] == "hermes-thread-456"
 
 
+def test_codex_websocket_headers_include_window_and_turn_metadata():
+    agent = SimpleNamespace(
+        api_key="sk-test",
+        session_id="hermes-session-123",
+        _thread_id="hermes-thread-456",
+    )
+
+    headers = codex_runtime._codex_websocket_headers(
+        agent,
+        {"model": "gpt-5.4"},
+    )
+
+    assert headers["x-codex-window-id"] == "hermes-thread-456:0"
+    metadata = json.loads(headers["x-codex-turn-metadata"])
+    assert metadata["request_kind"] == "turn"
+    assert metadata["session_id"] == "hermes-session-123"
+    assert metadata["thread_id"] == "hermes-thread-456"
+    assert metadata["turn_id"]
+    assert metadata["window_id"] == "hermes-thread-456:0"
+    assert metadata["model"] == "gpt-5.4"
+    assert isinstance(metadata["turn_started_at_unix_ms"], int)
+
+
+def test_codex_websocket_headers_keep_turn_metadata_stable_until_reset():
+    agent = SimpleNamespace(
+        api_key="sk-test",
+        session_id="hermes-session-123",
+        _thread_id="hermes-thread-456",
+    )
+
+    first = codex_runtime._codex_websocket_headers(agent, {"model": "gpt-5.4"})
+    second = codex_runtime._codex_websocket_headers(agent, {"model": "gpt-5.4"})
+    assert second["x-codex-turn-metadata"] == first["x-codex-turn-metadata"]
+
+    codex_runtime.reset_codex_responses_websocket_turn_fallback(agent)
+    third = codex_runtime._codex_websocket_headers(agent, {"model": "gpt-5.4"})
+    assert third["x-codex-turn-metadata"] != first["x-codex-turn-metadata"]
+    assert json.loads(third["x-codex-turn-metadata"])["turn_id"] != json.loads(
+        first["x-codex-turn-metadata"]
+    )["turn_id"]
+
+
 def test_codex_websocket_headers_fall_back_to_session_id_for_thread_id():
     agent = SimpleNamespace(
         api_key="sk-test",
@@ -161,6 +203,10 @@ def test_codex_websocket_headers_preserve_explicit_session_headers_case_insensit
     assert headers["Session-ID"] == "explicit-session"
     assert headers["Thread-ID"] == "explicit-thread"
     assert headers["X-Client-Request-ID"] == "explicit-request"
+    assert headers["x-codex-window-id"] == "derived-thread:0"
+    metadata = json.loads(headers["x-codex-turn-metadata"])
+    assert metadata["session_id"] == "derived-session"
+    assert metadata["thread_id"] == "derived-thread"
     assert "session-id" not in headers
     assert "thread-id" not in headers
     assert "x-client-request-id" not in headers
@@ -261,7 +307,7 @@ class _FakeWebSocket:
         return json.dumps(self.events.pop(0))
 
 
-def test_run_codex_stream_uses_provider_websocket_payload(monkeypatch):
+def test_run_codex_stream_uses_provider_websocket_payload(monkeypatch, caplog):
     events = [
         {"type": "response.output_text.delta", "delta": "hello"},
         {
@@ -303,6 +349,8 @@ def test_run_codex_stream_uses_provider_websocket_payload(monkeypatch):
         provider="vendor",
         base_url="https://api.vendor.example.com/v1",
         api_key="sk-test",
+        session_id="hermes-session-123",
+        _thread_id="hermes-thread-456",
         _interrupt_requested=False,
         _fire_stream_delta=deltas.append,
         _fire_reasoning_delta=lambda text: None,
@@ -320,21 +368,38 @@ def test_run_codex_stream_uses_provider_websocket_payload(monkeypatch):
         "extra_body": {"metadata": {"tenant": "vendor"}},
     }
 
-    response = codex_runtime.run_codex_stream(agent, api_kwargs)
+    with caplog.at_level("INFO", logger="agent.codex_runtime"):
+        response = codex_runtime.run_codex_stream(agent, api_kwargs)
 
     assert connect_calls[0]["uri"] == "wss://api.vendor.example.com/v1/responses"
     assert connect_calls[0]["additional_headers"]["Authorization"] == "Bearer sk-test"
     assert connect_calls[0]["additional_headers"]["X-Provider-Header"] == "abc"
     assert connect_calls[0]["additional_headers"]["OpenAI-Beta"] == "responses_websockets=2026-02-06"
+    assert connect_calls[0]["ping_interval"] is None
+    assert connect_calls[0]["ping_timeout"] is None
 
     sent = fake_ws.sent_payloads[0]
     assert sent["type"] == "response.create"
     assert sent["model"] == "gpt-5-codex"
     assert sent["metadata"] == {"tenant": "vendor"}
+    assert sent["client_metadata"]["x-codex-window-id"]
+    assert (
+        sent["client_metadata"]["x-codex-turn-metadata"]
+        == connect_calls[0]["additional_headers"]["x-codex-turn-metadata"]
+    )
+    assert sent["client_metadata"]["x-codex-ws-stream-request-start-ms"]
     assert "extra_body" not in sent
     assert "extra_headers" not in sent
     assert "timeout" not in sent
     assert "stream" not in sent
+
+    log_text = caplog.text
+    assert "codex_responses_websocket_event=request_prepared" in log_text
+    assert "has_window_id=True" in log_text
+    assert "has_turn_metadata=True" in log_text
+    assert "used_continuation=False" in log_text
+    assert "force_full_input=False" in log_text
+    assert "idle_timeout=30" in log_text
 
     assert deltas == ["hello"]
     assert response.id == "resp_1"
@@ -521,12 +586,29 @@ def test_websocket_turn_state_resets_at_conversation_turn_boundary():
     agent = SimpleNamespace(
         _codex_responses_websocket_output_committed=True,
         _codex_responses_websocket_turn_state="sticky-turn-token",
+        _codex_responses_websocket_turn_metadata_header="metadata",
     )
 
     codex_runtime.reset_codex_responses_websocket_turn_fallback(agent)
 
     assert agent._codex_responses_websocket_output_committed is False
     assert agent._codex_responses_websocket_turn_state is None
+    assert agent._codex_responses_websocket_turn_metadata_header is None
+
+
+def test_websocket_event_iterator_raises_on_business_idle_timeout():
+    class _SilentWebSocket:
+        def recv(self, timeout=None):
+            raise TimeoutError("no frame yet")
+
+    events = codex_runtime._iter_codex_websocket_events(
+        _SilentWebSocket(),
+        recv_timeout=0,
+        idle_timeout=0,
+    )
+
+    with pytest.raises(TimeoutError, match="websocket idle timeout"):
+        next(events)
 
 
 def test_websocket_stream_json_events_normalize_function_call_items(monkeypatch):
