@@ -181,119 +181,20 @@ def interruptible_api_call(agent, api_kwargs: dict):
         else:
             agent._close_request_openai_client(request_client, reason=reason)
 
-    def _close_codex_websocket_session_once() -> None:
-        if agent.api_mode != "codex_responses":
-            return
-        try:
-            from agent.codex_runtime import close_codex_responses_websocket_session
-            close_codex_responses_websocket_session(agent)
-        except Exception:
-            pass
-
-    def _prepare_codex_websocket_retry_once(reason: str, error: BaseException | None = None) -> None:
-        if agent.api_mode != "codex_responses":
-            return
-        try:
-            from agent.codex_runtime import (
-                close_codex_responses_websocket_session,
-                codex_responses_websocket_output_committed,
-                codex_responses_websocket_enabled,
-                prepare_codex_responses_websocket_retry,
-            )
-            if codex_responses_websocket_output_committed(agent):
-                close_codex_responses_websocket_session(agent)
-                return
-            if codex_responses_websocket_enabled(agent):
-                prepare_codex_responses_websocket_retry(agent, reason=reason, error=error)
-            else:
-                close_codex_responses_websocket_session(agent)
-        except Exception:
-            _close_codex_websocket_session_once()
-
-    def _mark_codex_websocket_error_once(error: BaseException) -> None:
-        if agent.api_mode != "codex_responses":
-            return
-        try:
-            from agent.codex_runtime import mark_codex_responses_websocket_error
-            mark_codex_responses_websocket_error(error)
-        except Exception:
-            pass
-
     def _call():
         try:
             if agent.api_mode == "codex_responses":
-                codex_use_websocket = False
-                try:
-                    from agent.codex_runtime import codex_responses_websocket_enabled
-                    codex_use_websocket = codex_responses_websocket_enabled(agent)
-                except Exception:
-                    codex_use_websocket = False
-                request_client = None
-                if codex_use_websocket:
-                    try:
-                        result["response"] = agent._run_codex_stream(
-                            api_kwargs,
-                            client=None,
-                            on_first_delta=getattr(agent, "_codex_on_first_delta", None),
-                        )
-                    except Exception as ws_error:
-                        try:
-                            from agent.codex_runtime import (
-                                disable_codex_responses_websocket_for_session,
-                                prepare_codex_responses_websocket_retry,
-                                should_immediately_fallback_codex_responses_websocket_to_http,
-                                should_fallback_codex_responses_websocket_to_http,
-                            )
-                            should_immediate_http_fallback = (
-                                should_immediately_fallback_codex_responses_websocket_to_http(ws_error)
-                            )
-                            should_websocket_retry = should_fallback_codex_responses_websocket_to_http(
-                                agent,
-                                ws_error,
-                            )
-                        except Exception:
-                            should_immediate_http_fallback = False
-                            should_websocket_retry = False
-                        if not should_websocket_retry:
-                            raise
-
-                        if should_immediate_http_fallback:
-                            disable_codex_responses_websocket_for_session(
-                                agent,
-                                reason="websocket_upgrade_required",
-                                error=ws_error,
-                            )
-                            request_client = _set_request_client(
-                                agent._create_request_openai_client(
-                                    reason="codex_stream_http_fallback",
-                                    api_kwargs=api_kwargs,
-                                )
-                            )
-                            result["response"] = agent._run_codex_stream(
-                                api_kwargs,
-                                client=request_client,
-                                on_first_delta=getattr(agent, "_codex_on_first_delta", None),
-                            )
-                            return
-
-                        prepare_codex_responses_websocket_retry(
-                            agent,
-                            reason="websocket_transport_error",
-                            error=ws_error,
-                        )
-                        raise
-                else:
-                    request_client = _set_request_client(
-                        agent._create_request_openai_client(
-                            reason="codex_stream_request",
-                            api_kwargs=api_kwargs,
-                        )
+                request_client = _set_request_client(
+                    agent._create_request_openai_client(
+                        reason="codex_stream_request",
+                        api_kwargs=api_kwargs,
                     )
-                    result["response"] = agent._run_codex_stream(
-                        api_kwargs,
-                        client=request_client,
-                        on_first_delta=getattr(agent, "_codex_on_first_delta", None),
-                    )
+                )
+                result["response"] = agent._run_codex_stream(
+                    api_kwargs,
+                    client=request_client,
+                    on_first_delta=getattr(agent, "_codex_on_first_delta", None),
+                )
             elif agent.api_mode == "anthropic_messages":
                 result["response"] = agent._anthropic_messages_create(api_kwargs)
             elif agent.api_mode == "bedrock_converse":
@@ -489,7 +390,6 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 )
             try:
                 _close_request_client_once("codex_ttfb_kill")
-                _prepare_codex_websocket_retry_once("codex_ttfb_kill")
             except Exception:
                 pass
             agent._touch_activity(
@@ -508,7 +408,6 @@ def interruptible_api_call(agent, api_kwargs: dict):
                         f"Codex stream produced no bytes within {int(_elapsed)}s "
                         f"(TTFB threshold: {int(_ttfb_timeout)}s)"
                     )
-                _mark_codex_websocket_error_once(result["error"])
             break
 
         # Stream-idle detector: the Codex backend emitted at least one SSE
@@ -537,7 +436,6 @@ def interruptible_api_call(agent, api_kwargs: dict):
             )
             try:
                 _close_request_client_once("codex_stream_idle_kill")
-                _prepare_codex_websocket_retry_once("codex_stream_idle_kill")
             except Exception:
                 pass
             agent._touch_activity(
@@ -549,7 +447,6 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     f"Codex stream produced no SSE events for {int(_event_stale_elapsed)}s "
                     f"after first byte (threshold: {int(_codex_idle_timeout)}s)"
                 )
-                _mark_codex_websocket_error_once(result["error"])
             break
 
         # Stale-call detector: kill the connection if no response
@@ -587,7 +484,6 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     agent._rebuild_anthropic_client()
                 else:
                     _close_request_client_once("stale_call_kill")
-                    _prepare_codex_websocket_retry_once("stale_call_kill")
             except Exception:
                 pass
             agent._touch_activity(
@@ -607,7 +503,6 @@ def interruptible_api_call(agent, api_kwargs: dict):
                         f"Non-streaming API call timed out after {int(_elapsed)}s "
                         f"with no response (threshold: {int(_stale_timeout)}s)"
                     )
-                _mark_codex_websocket_error_once(result["error"])
             break
 
         if agent._interrupt_requested:
@@ -620,7 +515,6 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     agent._rebuild_anthropic_client()
                 else:
                     _close_request_client_once("interrupt_abort")
-                    _close_codex_websocket_session_once()
             except Exception:
                 pass
             raise InterruptedError("Agent interrupted during API call")
@@ -686,20 +580,6 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         )
         is_xai_responses = agent.provider in {"xai", "xai-oauth"} or agent._base_url_hostname == "api.x.ai"
         _msgs_for_codex = agent._prepare_messages_for_non_vision_model(api_messages)
-        codex_window_id = None
-        codex_turn_metadata = None
-        try:
-            from agent.codex_runtime import (
-                _codex_responses_turn_metadata_header,
-                _codex_responses_window_id,
-            )
-            codex_window_id = _codex_responses_window_id(agent)
-            codex_turn_metadata = _codex_responses_turn_metadata_header(
-                agent,
-                {"model": agent.model},
-            )
-        except Exception:
-            logger.debug("Failed to build Codex Responses turn metadata", exc_info=True)
 
         # xAI's /responses endpoint rejects ``pattern`` and ``format`` keywords
         # in tool schemas (HTTP 400 "Invalid arguments passed to the model").
@@ -739,14 +619,9 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             tools=tools_for_api,
             reasoning_config=agent.reasoning_config,
             session_id=getattr(agent, "session_id", None),
-            thread_id=getattr(agent, "_thread_id", None),
-            codex_turn_state=getattr(agent, "_codex_responses_websocket_turn_state", None),
-            codex_window_id=codex_window_id,
-            codex_turn_metadata=codex_turn_metadata,
             max_tokens=agent.max_tokens,
             timeout=agent._resolved_api_call_timeout(),
             request_overrides=agent.request_overrides,
-            base_url=agent.base_url,
             is_github_responses=is_github_responses,
             is_codex_backend=is_codex_backend,
             is_xai_responses=is_xai_responses,

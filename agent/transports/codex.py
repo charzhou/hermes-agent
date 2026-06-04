@@ -5,75 +5,10 @@ This transport owns format conversion and normalization — NOT client lifecycle
 streaming, or the _run_codex_stream() call path.
 """
 
-import json
-import time
-import uuid
 from typing import Any, Dict, List, Optional
 
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
-
-
-_CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
-_CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
-_CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
-
-
-def _header_present(headers: Dict[str, str], name: str) -> bool:
-    target = name.lower()
-    return any(str(key).lower() == target for key in headers)
-
-
-def _set_header_if_missing(headers: Dict[str, str], name: str, value: Any) -> None:
-    value = str(value or "").strip()
-    if not value or _header_present(headers, name):
-        return
-    headers[name] = value
-
-
-def _merge_extra_headers_if_missing(kwargs: Dict[str, Any], headers_to_add: Dict[str, Any]) -> None:
-    existing_extra_headers = kwargs.get("extra_headers")
-    merged_extra_headers: Dict[str, str] = {}
-    if isinstance(existing_extra_headers, dict):
-        merged_extra_headers.update(
-            {
-                str(key): str(value)
-                for key, value in existing_extra_headers.items()
-                if key and value is not None
-            }
-        )
-    for name, value in headers_to_add.items():
-        _set_header_if_missing(merged_extra_headers, name, value)
-    if merged_extra_headers:
-        kwargs["extra_headers"] = merged_extra_headers
-
-
-def _codex_window_id(thread_id: str) -> str:
-    thread_id = str(thread_id or "").strip()
-    return f"{thread_id}:0" if thread_id else ""
-
-
-def _codex_turn_metadata(
-    *,
-    model: str,
-    session_id: str,
-    thread_id: str,
-    window_id: str,
-) -> str:
-    metadata: Dict[str, Any] = {
-        "request_kind": "turn",
-        "turn_id": f"turn_{uuid.uuid4().hex}",
-        "turn_started_at_unix_ms": int(time.time() * 1000),
-    }
-    if session_id:
-        metadata["session_id"] = session_id
-    if thread_id:
-        metadata["thread_id"] = thread_id
-    if window_id:
-        metadata["window_id"] = window_id
-    if model:
-        metadata["model"] = model
-    return json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
 
 
 class ResponsesApiTransport(ProviderTransport):
@@ -136,11 +71,7 @@ class ResponsesApiTransport(ProviderTransport):
         params:
             instructions: str — system prompt (extracted from messages[0] if not given)
             reasoning_config: dict | None — {effort, enabled}
-            session_id: str | None — used for prompt_cache_key + session headers
-            thread_id: str | None — used for Codex session affinity headers
-            codex_turn_state: str | None — same-turn sticky routing token
-            codex_window_id: str | None — Codex window affinity header
-            codex_turn_metadata: str | None — stable per-turn Codex metadata header
+            session_id: str | None — used for prompt_cache_key + xAI conv header
             max_tokens: int | None — max_output_tokens
             timeout: float | None — per-request timeout forwarded to the SDK
             request_overrides: dict | None — extra kwargs merged in
@@ -286,29 +217,23 @@ class ResponsesApiTransport(ProviderTransport):
         else:
             kwargs.pop("timeout", None)
 
-        if session_id and not is_xai_responses:
-            thread_id = str(params.get("thread_id") or session_id).strip()
-            window_id = str(params.get("codex_window_id") or _codex_window_id(thread_id)).strip()
-            turn_metadata = str(
-                params.get("codex_turn_metadata")
-                or _codex_turn_metadata(
-                    model=model,
-                    session_id=str(session_id or "").strip(),
-                    thread_id=thread_id,
-                    window_id=window_id,
-                )
-            ).strip()
-            _merge_extra_headers_if_missing(
-                kwargs,
-                {
-                    "session-id": session_id,
-                    "thread-id": thread_id,
-                    "x-client-request-id": thread_id,
-                    _CODEX_WINDOW_ID_HEADER: window_id,
-                    _CODEX_TURN_METADATA_HEADER: turn_metadata,
-                    _CODEX_TURN_STATE_HEADER: params.get("codex_turn_state"),
-                },
-            )
+        if is_codex_backend:
+            prompt_cache_key = kwargs.get("prompt_cache_key")
+            cache_scope_id = str(prompt_cache_key or session_id or "").strip()
+            if cache_scope_id:
+                existing_extra_headers = kwargs.get("extra_headers")
+                merged_extra_headers: Dict[str, str] = {}
+                if isinstance(existing_extra_headers, dict):
+                    merged_extra_headers.update(
+                        {
+                            str(key): str(value)
+                            for key, value in existing_extra_headers.items()
+                            if key and value is not None
+                        }
+                    )
+                merged_extra_headers["session_id"] = cache_scope_id
+                merged_extra_headers["x-client-request-id"] = cache_scope_id
+                kwargs["extra_headers"] = merged_extra_headers
 
         max_tokens = params.get("max_tokens")
         if max_tokens is not None and not is_codex_backend:
@@ -351,11 +276,7 @@ class ResponsesApiTransport(ProviderTransport):
         # otherwise the stash from the matching build_kwargs/convert_messages
         # call. Either way it gets stamped onto reasoning items so future
         # turns can detect a model swap and drop foreign-issuer blobs.
-        issuer_kind = (
-            kwargs.get("issuer_kind")
-            or getattr(response, "issuer_kind", None)
-            or self._last_issuer_kind
-        )
+        issuer_kind = kwargs.get("issuer_kind") or self._last_issuer_kind
         # _normalize_codex_response returns (SimpleNamespace, finish_reason_str)
         msg, finish_reason = _normalize_codex_response(response, issuer_kind=issuer_kind)
 

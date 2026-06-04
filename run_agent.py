@@ -2879,12 +2879,6 @@ class AIAgent:
 
         # Close the OpenAI/httpx client to release sockets immediately.
         try:
-            from agent.codex_runtime import close_codex_responses_websocket_session
-            close_codex_responses_websocket_session(self)
-        except Exception:
-            pass
-
-        try:
             client = getattr(self, "client", None)
             if client is not None:
                 self._close_openai_client(client, reason="cache_evict", shared=True)
@@ -2940,12 +2934,6 @@ class AIAgent:
             pass
 
         # 5. Close the OpenAI/httpx client
-        try:
-            from agent.codex_runtime import close_codex_responses_websocket_session
-            close_codex_responses_websocket_session(self)
-        except Exception:
-            pass
-
         try:
             client = getattr(self, "client", None)
             if client is not None:

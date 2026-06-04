@@ -33,8 +33,6 @@ def _make_codex_agent(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
     (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
-    import run_agent
-    monkeypatch.setattr(run_agent, "_hermes_home", tmp_path)
     from run_agent import AIAgent
 
     agent = AIAgent(
@@ -79,11 +77,7 @@ def test_ttfb_kills_when_no_stream_event(tmp_path, monkeypatch):
         agent, "_close_request_openai_client",
         lambda c, reason=None: closes.append(reason),
     )
-    websocket_closes: list = []
-    monkeypatch.setattr(
-        "agent.codex_runtime.close_codex_responses_websocket_session",
-        lambda closed_agent: websocket_closes.append(closed_agent),
-    )
+
     stop = {"flag": False}
 
     def fake_hang(api_kwargs, client=None, on_first_delta=None):
@@ -102,62 +96,8 @@ def test_ttfb_kills_when_no_stream_event(tmp_path, monkeypatch):
         elapsed = time.time() - t0
         assert "TTFB" in str(excinfo.value)
         assert "codex_ttfb_kill" in closes
-        assert websocket_closes == [agent]
         # ~1s cutoff + 2s join grace; must be far under the 60s stale timeout.
         assert elapsed < 15, f"TTFB watchdog took {elapsed:.1f}s"
-    finally:
-        stop["flag"] = True
-
-
-def test_ttfb_kill_marks_websocket_retry_with_full_input(tmp_path, monkeypatch):
-    """A no-byte WebSocket watchdog kill should make the retry loop reopen
-    WebSocket with full input; HTTP fallback happens only after retry exhaustion."""
-    from agent import chat_completion_helpers as h
-    from agent.codex_runtime import (
-        codex_responses_websocket_enabled,
-        is_codex_responses_websocket_error,
-        reset_codex_responses_websocket_turn_fallback,
-    )
-
-    agent = _make_codex_agent(tmp_path, monkeypatch)
-    agent.provider = "openai-codex"
-    agent.base_url = "https://chatgpt.com/backend-api/codex"
-    (tmp_path / "config.yaml").write_text(
-        """
-providers:
-  openai-codex:
-    base_url: https://chatgpt.com/backend-api/codex
-    codex_responses_websocket: true
-""".lstrip(),
-        encoding="utf-8",
-    )
-    reset_codex_responses_websocket_turn_fallback(agent)
-    assert codex_responses_websocket_enabled(agent) is True
-
-    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "1")
-    dummy_client = SimpleNamespace()
-    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **k: dummy_client)
-    monkeypatch.setattr(agent, "_abort_request_openai_client", lambda *a, **k: None)
-    monkeypatch.setattr(agent, "_close_request_openai_client", lambda *a, **k: None)
-    stop = {"flag": False}
-
-    def fake_hang(api_kwargs, client=None, on_first_delta=None):
-        deadline = time.time() + 30
-        while time.time() < deadline and not stop["flag"] and not agent._interrupt_requested:
-            time.sleep(0.02)
-        raise RuntimeError("connection closed")
-
-    monkeypatch.setattr(agent, "_run_codex_stream", fake_hang)
-
-    try:
-        with pytest.raises(TimeoutError) as excinfo:
-            h.interruptible_api_call(agent, {"model": "gpt-5.5", "input": "hi"})
-        assert codex_responses_websocket_enabled(agent) is True
-        assert is_codex_responses_websocket_error(excinfo.value) is True
-        assert getattr(agent, "_codex_responses_websocket_chain_invalidated_key") == (
-            "openai-codex",
-            "https://chatgpt.com/backend-api/codex",
-        )
     finally:
         stop["flag"] = True
 
@@ -354,6 +294,7 @@ def test_event_idle_kills_after_first_event_then_silence(tmp_path, monkeypatch):
         "_close_request_openai_client",
         lambda c, reason=None: closes.append(reason),
     )
+
     stop = {"flag": False}
 
     def fake_stream(api_kwargs, client=None, on_first_delta=None):

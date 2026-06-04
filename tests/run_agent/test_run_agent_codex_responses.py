@@ -300,20 +300,6 @@ def test_build_api_kwargs_codex(monkeypatch):
     assert "extra_body" not in kwargs
 
 
-def test_build_api_kwargs_codex_includes_session_affinity_and_turn_state(monkeypatch):
-    agent = _build_agent(monkeypatch)
-    agent._thread_id = "thread-for-sticky-routing"
-    agent._codex_responses_websocket_turn_state = "turn-state-token"
-
-    kwargs = agent._build_api_kwargs([{"role": "user", "content": "Ping"}])
-
-    headers = kwargs.get("extra_headers", {})
-    assert headers["session-id"] == agent.session_id
-    assert headers["thread-id"] == "thread-for-sticky-routing"
-    assert headers["x-client-request-id"] == "thread-for-sticky-routing"
-    assert headers["x-codex-turn-state"] == "turn-state-token"
-
-
 def test_build_api_kwargs_codex_clamps_minimal_effort(monkeypatch):
     """'minimal' reasoning effort is clamped to 'low' on the Responses API.
 
@@ -2162,47 +2148,9 @@ def test_chat_messages_to_responses_input_deduplicates_reasoning_ids(monkeypatch
     assert encrypted.count("enc_1") == 1
     assert "enc_2" in encrypted
     assert "enc_3" in encrypted
-    assert [it.get("id") for it in reasoning_items] == ["rs_aaa", "rs_bbb", "rs_ccc"]
-
-
-def test_chat_messages_to_responses_input_keeps_reasoning_id_for_message_replay(monkeypatch):
-    """Stored assistant message IDs require their paired reasoning item IDs."""
-    agent = _build_agent(monkeypatch)
-    messages = [
-        {"role": "user", "content": "check weather"},
-        {
-            "role": "assistant",
-            "content": "I found it.",
-            "codex_reasoning_items": [
-                {
-                    "type": "reasoning",
-                    "id": "rs_required",
-                    "encrypted_content": "enc_required",
-                    "summary": [],
-                }
-            ],
-            "codex_message_items": [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "id": "msg_requires_reasoning",
-                    "phase": "final_answer",
-                    "content": [{"type": "output_text", "text": "I found it."}],
-                }
-            ],
-        },
-    ]
-    from agent.codex_responses_adapter import _chat_messages_to_responses_input
-    items = _chat_messages_to_responses_input(messages)
-
-    reasoning_idx = next(i for i, it in enumerate(items) if it.get("type") == "reasoning")
-    message_idx = next(i for i, it in enumerate(items) if it.get("type") == "message")
-    assert reasoning_idx < message_idx
-    assert items[reasoning_idx]["id"] == "rs_required"
-    assert items[reasoning_idx]["encrypted_content"] == "enc_required"
-    assert items[message_idx]["id"] == "msg_requires_reasoning"
-    assert items[message_idx]["phase"] == "final_answer"
+    # IDs must be stripped — with store=False the API 404s on id lookups.
+    for it in reasoning_items:
+        assert "id" not in it
 
 
 def test_preflight_codex_input_deduplicates_reasoning_ids(monkeypatch):
@@ -2225,7 +2173,9 @@ def test_preflight_codex_input_deduplicates_reasoning_ids(monkeypatch):
     encrypted = [it["encrypted_content"] for it in reasoning_items]
     assert encrypted.count("enc_a") == 1
     assert "enc_b" in encrypted
-    assert [it.get("id") for it in reasoning_items] == ["rs_xyz", "rs_zzz"]
+    # IDs must be stripped — with store=False the API 404s on id lookups.
+    for it in reasoning_items:
+        assert "id" not in it
 
 
 def test_run_conversation_codex_disables_reasoning_replay_after_invalid_encrypted_content(monkeypatch):
