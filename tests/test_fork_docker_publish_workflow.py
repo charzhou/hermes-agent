@@ -51,4 +51,4 @@ class TestForkDockerPublishWorkflow:
         content = self.WORKFLOW_PATH.read_text(encoding="utf-8")
         assert 'short_sha="${GITHUB_SHA::12}"' in content
         assert 'short_sha6="${GITHUB_SHA::6}"' in content
-        assert 'tag_sha_short=${IMAGE_NAME_LOWER}:sha-${short_sha6}' in content
+        assert 'tag_sha_short=${IMAGE_NAME_LOWER}:${short_sha6}' in content

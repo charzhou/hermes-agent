@@ -64,7 +64,7 @@ jobs:
             echo "tag_main=${IMAGE_NAME_LOWER}:main"
             echo "tag_latest=${IMAGE_NAME_LOWER}:latest"
             echo "tag_sha=${IMAGE_NAME_LOWER}:sha-${short_sha}"
-            echo "tag_sha_short=${IMAGE_NAME_LOWER}:sha-${short_sha6}"
+            echo "tag_sha_short=${IMAGE_NAME_LOWER}:${short_sha6}"
           } >> "$GITHUB_OUTPUT"
         env:
           IMAGE_NAME_LOWER: ${{ steps.image.outputs.image_name }}
