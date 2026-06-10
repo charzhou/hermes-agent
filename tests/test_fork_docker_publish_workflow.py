@@ -46,3 +46,9 @@ class TestForkDockerPublishWorkflow:
         assert "tr '[:upper:]' '[:lower:]'" in content
         assert "docker/login-action" in content
         assert "docker/build-push-action" in content
+
+    def test_emits_short_sha_tag(self):
+        content = self.WORKFLOW_PATH.read_text(encoding="utf-8")
+        assert 'short_sha="${GITHUB_SHA::12}"' in content
+        assert 'short_sha6="${GITHUB_SHA::6}"' in content
+        assert 'tag_sha_short=${IMAGE_NAME_LOWER}:sha-${short_sha6}' in content

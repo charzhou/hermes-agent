@@ -59,10 +59,12 @@ jobs:
         shell: bash
         run: |
           short_sha="${GITHUB_SHA::12}"
+          short_sha6="${GITHUB_SHA::6}"
           {
             echo "tag_main=${IMAGE_NAME_LOWER}:main"
             echo "tag_latest=${IMAGE_NAME_LOWER}:latest"
             echo "tag_sha=${IMAGE_NAME_LOWER}:sha-${short_sha}"
+            echo "tag_sha_short=${IMAGE_NAME_LOWER}:sha-${short_sha6}"
           } >> "$GITHUB_OUTPUT"
         env:
           IMAGE_NAME_LOWER: ${{ steps.image.outputs.image_name }}
@@ -78,6 +80,7 @@ jobs:
             ${{ steps.tags.outputs.tag_main }}
             ${{ steps.tags.outputs.tag_latest }}
             ${{ steps.tags.outputs.tag_sha }}
+            ${{ steps.tags.outputs.tag_sha_short }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
