@@ -1043,6 +1043,7 @@ class GatewaySlashCommandsMixin:
                             "api_key": result.api_key,
                             "base_url": result.base_url,
                             "api_mode": result.api_mode,
+                            "request_overrides": dict(getattr(result, "request_overrides", None) or {}),
                         }
 
                         # Evict cached agent so the next turn creates a fresh
@@ -1199,6 +1200,7 @@ class GatewaySlashCommandsMixin:
                 "api_key": result.api_key,
                 "base_url": result.base_url,
                 "api_mode": result.api_mode,
+                "request_overrides": dict(getattr(result, "request_overrides", None) or {}),
             }
 
             # Evict cached agent so the next turn creates a fresh agent from the
