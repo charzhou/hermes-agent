@@ -43,5 +43,6 @@ class TestForkDockerPublishWorkflow:
         content = self.WORKFLOW_PATH.read_text(encoding="utf-8")
         assert "FORK_IMAGE_NAME" in content
         assert "ghcr.io" in content
+        assert "tr '[:upper:]' '[:lower:]'" in content
         assert "docker/login-action" in content
         assert "docker/build-push-action" in content

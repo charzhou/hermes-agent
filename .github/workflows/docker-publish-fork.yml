@@ -31,6 +31,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Normalize image name
+        id: image
+        shell: bash
+        run: |
+          image_name_lower="$(printf '%s' "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+          echo "image_name=${image_name_lower}" >> "$GITHUB_OUTPUT"
+
       - name: Build image for smoke test
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
@@ -38,14 +45,14 @@ jobs:
           file: Dockerfile
           load: true
           platforms: linux/amd64
-          tags: ${{ env.IMAGE_NAME }}:test
+          tags: ${{ steps.image.outputs.image_name }}:test
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
 
       - name: Smoke test image
         uses: ./.github/actions/hermes-smoke-test
         with:
-          image: ${{ env.IMAGE_NAME }}:test
+          image: ${{ steps.image.outputs.image_name }}:test
 
       - name: Compute image tags
         id: tags
@@ -53,10 +60,12 @@ jobs:
         run: |
           short_sha="${GITHUB_SHA::12}"
           {
-            echo "tag_main=${IMAGE_NAME}:main"
-            echo "tag_latest=${IMAGE_NAME}:latest"
-            echo "tag_sha=${IMAGE_NAME}:sha-${short_sha}"
+            echo "tag_main=${IMAGE_NAME_LOWER}:main"
+            echo "tag_latest=${IMAGE_NAME_LOWER}:latest"
+            echo "tag_sha=${IMAGE_NAME_LOWER}:sha-${short_sha}"
           } >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_NAME_LOWER: ${{ steps.image.outputs.image_name }}
 
       - name: Build and push image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
