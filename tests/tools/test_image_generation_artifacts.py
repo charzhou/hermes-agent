@@ -58,6 +58,28 @@ def test_postprocess_maps_docker_cache_path_without_active_env(monkeypatch, tmp_
     assert result["agent_visible_image"] == "/root/.hermes/cache/images/generated.png"
 
 
+def test_postprocess_maps_docker_cache_path_from_config_without_env(monkeypatch, tmp_path):
+    from tools import image_generation_tool
+
+    hermes_home = tmp_path / ".hermes"
+    image_dir = hermes_home / "cache" / "images"
+    image_dir.mkdir(parents=True)
+    image_path = image_dir / "generated.png"
+    image_path.write_bytes(b"png")
+    (hermes_home / "config.yaml").write_text("terminal:\n  backend: docker\n")
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+    monkeypatch.setattr(image_generation_tool, "_active_terminal_env", lambda task_id: None)
+
+    raw = json.dumps({"success": True, "image": str(image_path)})
+    result = json.loads(image_generation_tool._postprocess_image_generate_result(raw))
+
+    assert result["image"] == str(image_path)
+    assert result["host_image"] == str(image_path)
+    assert result["agent_visible_image"] == "/root/.hermes/cache/images/generated.png"
+
+
 def test_postprocess_maps_ssh_cache_path_without_active_env(monkeypatch, tmp_path):
     from tools import image_generation_tool
 

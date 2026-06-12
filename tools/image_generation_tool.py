@@ -627,6 +627,25 @@ def _active_terminal_env(task_id: str | None):
         return None
 
 
+def _configured_terminal_backend() -> str:
+    env_backend = (os.getenv("TERMINAL_ENV") or "").strip().lower()
+    try:
+        from hermes_cli.config import load_config_readonly, read_raw_config
+
+        raw_cfg = read_raw_config()
+        raw_terminal_cfg = raw_cfg.get("terminal") if isinstance(raw_cfg, dict) else None
+        if isinstance(raw_terminal_cfg, dict) and "backend" in raw_terminal_cfg:
+            cfg = load_config_readonly()
+            terminal_cfg = cfg.get("terminal") if isinstance(cfg, dict) else None
+            if isinstance(terminal_cfg, dict):
+                backend = terminal_cfg.get("backend")
+                if isinstance(backend, str) and backend.strip():
+                    return backend.strip().lower()
+    except Exception as exc:  # noqa: BLE001 - artifact hinting must not break generation
+        logger.debug("Could not read configured terminal backend: %s", exc)
+    return env_backend or "local"
+
+
 def _agent_cache_base_for_env(env: Any) -> str | None:
     if env is not None:
         # Forward-looking optional override: an environment may expose its own
@@ -654,7 +673,7 @@ def _agent_cache_base_for_env(env: Any) -> str | None:
     # Hermes cache roots can be translated without side effects. SSH can still
     # use a shell-visible tilde path; its first environment sync will upload
     # the cache file before the first command runs.
-    backend = (os.getenv("TERMINAL_ENV") or "local").strip().lower()
+    backend = _configured_terminal_backend()
     if backend in {"docker", "singularity", "modal"}:
         return "/root/.hermes"
     if backend == "ssh":
@@ -673,7 +692,9 @@ def _agent_visible_cache_path(host_path: str, env: Any) -> str | None:
     try:
         from tools.credential_files import map_cache_path_to_container
 
-        return map_cache_path_to_container(host_path, container_base=cache_base)
+        mapped = map_cache_path_to_container(host_path, container_base=cache_base)
+        if mapped:
+            return mapped
     except Exception as exc:  # noqa: BLE001
         logger.debug("Could not translate image cache path for backend: %s", exc)
     return None
