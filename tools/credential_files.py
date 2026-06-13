@@ -338,16 +338,17 @@ def iter_skills_files(
 
 
 # ---------------------------------------------------------------------------
-# Cache directory mounts (documents, images, audio, screenshots)
+# Cache directory mounts (documents, images, audio, videos, screenshots)
 # ---------------------------------------------------------------------------
 
-# The four cache subdirectories that should be mirrored into remote backends.
-# Each tuple is (new_subpath, old_name). New-layout dirs win when present,
-# because providers now write generated artifacts there.
+# The cache subdirectories that should be mirrored into remote backends.
+# Each tuple is (new_subpath, old_name). New-layout dirs win for mounts when
+# present because providers now write generated artifacts there.
 _CACHE_DIRS: list[tuple[str, str]] = [
     ("cache/documents", "document_cache"),
     ("cache/images", "image_cache"),
     ("cache/audio", "audio_cache"),
+    ("cache/videos", "video_cache"),
     ("cache/screenshots", "browser_screenshots"),
 ]
 
@@ -459,4 +460,3 @@ def iter_cache_files(
 def clear_credential_files() -> None:
     """Reset the skill-scoped registry (e.g. on session reset)."""
     _get_registered().clear()
-

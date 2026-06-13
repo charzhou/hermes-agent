@@ -43,13 +43,16 @@ import {
 import {
   $queuedPromptsBySession,
   enqueueQueuedPrompt,
+  MAX_AUTO_DRAIN_ATTEMPTS,
+  migrateQueuedPrompts,
   promoteQueuedPrompt,
   type QueuedPromptEntry,
   removeQueuedPrompt,
-  shouldAutoDrainOnSettle,
+  shouldAutoDrain,
   updateQueuedPrompt
 } from '@/store/composer-queue'
 import { $statusItemsBySession } from '@/store/composer-status'
+import { notify } from '@/store/notifications'
 import { $gatewayState, $messages, setSessionPickerOpen } from '@/store/session'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 import { useTheme } from '@/themes'
@@ -196,11 +199,14 @@ export function ChatBar({
   const composerSurfaceRef = useRef<HTMLDivElement | null>(null)
   const editorRef = useRef<HTMLDivElement | null>(null)
   const draftRef = useRef(draft)
-  const previousBusyRef = useRef(busy)
   const pendingDraftPersistRef = useRef<{ scope: string | null; text: string } | null>(null)
   const activeQueueSessionKeyRef = useRef(activeQueueSessionKey)
   activeQueueSessionKeyRef.current = activeQueueSessionKey
+  const prevQueueKeyRef = useRef(activeQueueSessionKey)
   const drainingQueueRef = useRef(false)
+  // Per-entry auto-drain failure counts; bounds retries so a persistent 404
+  // can't spin-loop. Cleared on success; reset naturally on remount/reconnect.
+  const drainFailuresRef = useRef(new Map<string, number>())
   const urlInputRef = useRef<HTMLInputElement | null>(null)
 
   const [urlOpen, setUrlOpen] = useState(false)
@@ -241,6 +247,8 @@ export function ChatBar({
   const gatewayState = useStore($gatewayState)
   const newSessionPlaceholders = t.composer.newSessionPlaceholders
   const followUpPlaceholders = t.composer.followUpPlaceholders
+  const reconnecting = gatewayState === 'closed' || gatewayState === 'error'
+  const inputDisabled = disabled && !reconnecting
 
   // Resting placeholder: a starter for brand-new sessions, a continuation for
   // existing ones. Picked once and only re-rolled when we genuinely move to a
@@ -271,11 +279,13 @@ export function ChatBar({
     setRestingPlaceholder(pickPlaceholder(sessionId ? followUpPlaceholders : newSessionPlaceholders))
   }, [followUpPlaceholders, newSessionPlaceholders, sessionId])
 
-  // When the bar is disabled it's because the gateway isn't open. Distinguish a
-  // cold start ("Starting Hermes...") from a dropped connection we're trying to
-  // restore (e.g. after the Mac slept) so the stuck state reads as recoverable.
+  // When the transport is disabled it's because the gateway isn't open.
+  // Distinguish a cold start ("Starting Hermes...") from a dropped connection
+  // we're trying to restore. During reconnect, keep the textbox editable so a
+  // flaky network doesn't block drafting; only submit/backend actions stay
+  // disabled until the gateway is open again.
   const placeholder = disabled
-    ? gatewayState === 'closed' || gatewayState === 'error'
+    ? reconnecting
       ? t.composer.placeholderReconnecting
       : t.composer.placeholderStarting
     : restingPlaceholder
@@ -317,13 +327,13 @@ export function ChatBar({
   )
 
   useEffect(() => {
-    if (!disabled) {
+    if (!inputDisabled) {
       focusInput()
     }
-  }, [disabled, focusInput, focusKey, focusRequestId])
+  }, [focusInput, focusKey, focusRequestId, inputDisabled])
 
   useEffect(() => {
-    if (disabled) {
+    if (inputDisabled) {
       return undefined
     }
 
@@ -343,7 +353,7 @@ export function ChatBar({
       offFocus()
       offInsert()
     }
-  }, [appendExternalText, disabled])
+  }, [appendExternalText, inputDisabled])
 
   // Keep draftRef in sync with the assistant-ui composer state for callers
   // that read the latest text outside the React render cycle. We don't push
@@ -928,6 +938,10 @@ export function ChatBar({
       const editorText = editorRef.current ? composerPlainText(editorRef.current) : draftRef.current
       const hasLivePayload = editorText.trim().length > 0 || attachments.length > 0
 
+      if (disabled) {
+        return
+      }
+
       if (!busy && !hasLivePayload && queuedPrompts.length > 0) {
         void drainNextQueued()
 
@@ -1326,6 +1340,7 @@ export function ChatBar({
           return false
         }
 
+        drainFailuresRef.current.delete(entry.id)
         removeQueuedPrompt(activeQueueSessionKey, entry.id)
         resetBrowseState(sessionId)
 
@@ -1337,15 +1352,16 @@ export function ChatBar({
     [activeQueueSessionKey, onSubmit, queuedPrompts, sessionId]
   )
 
-  const drainNextQueued = useCallback(
-    () =>
-      runDrain(entries => {
-        const skip = queueEdit?.entryId
+  const pickDrainHead = useCallback(
+    (entries: QueuedPromptEntry[]) => {
+      const skip = queueEditRef.current?.entryId
 
-        return skip ? entries.find(e => e.id !== skip) : entries[0]
-      }),
-    [queueEdit, runDrain]
+      return skip ? entries.find(e => e.id !== skip) : entries[0]
+    },
+    [] // reads the edit id off a ref so the lock-holder always sees the latest
   )
+
+  const drainNextQueued = useCallback(() => runDrain(pickDrainHead), [pickDrainHead, runDrain])
 
   const sendQueuedNow = useCallback(
     (id: string) => {
@@ -1364,30 +1380,76 @@ export function ChatBar({
         return true
       }
 
+      // A manual send clears the auto-drain backoff so a stuck entry the user
+      // taps gets a fresh attempt (and re-enables auto-retry on success).
+      drainFailuresRef.current.delete(id)
+
       return runDrain(entries => entries.find(e => e.id === id))
     },
     [activeQueueSessionKey, busy, onCancel, queueEdit, runDrain]
   )
 
-  // Auto-drain on busy → false (turn settled). Queued turns always flow once
-  // the session is idle again — whether the turn finished naturally or the
-  // user interrupted it. Interrupting to reach a queued message is the whole
-  // point of the queue, so we never suppress the drain. To cancel queued
-  // turns, the user deletes them from the panel.
-  useEffect(() => {
-    const wasBusy = previousBusyRef.current
-    previousBusyRef.current = busy
-
-    if (
-      shouldAutoDrainOnSettle({
-        isBusy: busy,
-        queueLength: queuedPrompts.length,
-        wasBusy
-      })
-    ) {
-      void drainNextQueued()
+  // Edge-independent auto-drain: send the head whenever the session is idle and
+  // the queue is non-empty, bounding retries so a thrown/rejected onSubmit (e.g.
+  // a stale-session 404) can't strand the entry permanently nor spin-loop. The
+  // drain lock serializes sends; a remount/reconnect resets the failure counts.
+  const autoDrainNext = useCallback(() => {
+    if (busy || drainingQueueRef.current || !activeQueueSessionKey) {
+      return
     }
-  }, [busy, drainNextQueued, queuedPrompts.length])
+
+    const entry = pickDrainHead(queuedPrompts)
+
+    if (!entry || (drainFailuresRef.current.get(entry.id) ?? 0) >= MAX_AUTO_DRAIN_ATTEMPTS) {
+      return
+    }
+
+    const onFail = () => {
+      const fails = (drainFailuresRef.current.get(entry.id) ?? 0) + 1
+      drainFailuresRef.current.set(entry.id, fails)
+
+      if (fails >= MAX_AUTO_DRAIN_ATTEMPTS) {
+        notify({
+          id: 'composer-queue-stuck',
+          kind: 'error',
+          title: t.composer.queueStuckTitle,
+          message: t.composer.queueStuckBody
+        })
+      }
+    }
+
+    void runDrain(() => entry)
+      .then(sent => {
+        if (!sent) {
+          onFail()
+        }
+      })
+      .catch(onFail)
+  }, [activeQueueSessionKey, busy, pickDrainHead, queuedPrompts, runDrain, t])
+
+  // Re-key on a runtime session-id change. A stable stored id (queueSessionKey)
+  // never churns, so a change there is a real session switch and must NOT
+  // migrate; only the runtime-derived key (queueSessionKey falsy → key is
+  // sessionId) churns on a backend bounce/resume of the same conversation.
+  useEffect(() => {
+    const prev = prevQueueKeyRef.current
+    prevQueueKeyRef.current = activeQueueSessionKey
+
+    if (queueSessionKey || !prev || !activeQueueSessionKey || prev === activeQueueSessionKey) {
+      return
+    }
+
+    migrateQueuedPrompts(prev, activeQueueSessionKey)
+  }, [activeQueueSessionKey, queueSessionKey])
+
+  // Queued turns flow whenever the session is idle — on the busy→false settle
+  // edge, on mount/reconnect, and after a re-key — so a swallowed edge can't
+  // strand them. To cancel queued turns, the user deletes them from the panel.
+  useEffect(() => {
+    if (shouldAutoDrain({ isBusy: busy, queueLength: queuedPrompts.length })) {
+      autoDrainNext()
+    }
+  }, [autoDrainNext, busy, queuedPrompts.length])
 
   // Queue-edit cleanup: on session swap the scope effect already stashed the
   // edit snapshot; only restore into the composer when still on the same scope.
@@ -1422,6 +1484,10 @@ export function ChatBar({
   }
 
   const submitDraft = () => {
+    if (disabled) {
+      return
+    }
+
     // Source the text from the DOM editor, not React state. The AUI composer
     // state (`draft`) and the derived `hasComposerPayload` lag the DOM by a
     // render, so on fast typing or IME composition the final keystroke(s) may
@@ -1602,6 +1668,7 @@ export function ChatBar({
   const input = (
     <div className={cn('relative', stacked ? 'w-full' : 'min-w-(--composer-input-inline-min-width) flex-1')}>
       <div
+        aria-disabled={inputDisabled ? true : undefined}
         aria-label={t.composer.message}
         autoCapitalize="off"
         autoCorrect="off"
@@ -1612,7 +1679,7 @@ export function ChatBar({
           stacked && 'pl-3',
           stacked ? 'w-full' : 'min-w-(--composer-input-inline-min-width) flex-1'
         )}
-        contentEditable={!disabled}
+        contentEditable={!inputDisabled}
         data-placeholder={placeholder}
         data-slot={RICH_INPUT_SLOT}
         onBlur={() => window.setTimeout(closeTrigger, 80)}
