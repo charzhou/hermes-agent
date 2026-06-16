@@ -45,6 +45,10 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
+    "chaslui@outlook.com": "ChasLui",
+    "rio.jeong@thebytesize.ai": "rio-jeong",
+    "yehaotian@xuanshudeMac-mini.local": "ArcanePivot",
+    "dbeyer7@gmail.com": "benegessarit",
     "kenmege@yahoo.com": "Kenmege",
     "tianying.x@eukarya.io": "xtymac",
     "dkobi16@gmail.com": "Diyoncrz18",
@@ -85,8 +89,13 @@ AUTHOR_MAP = {
     "290859878+synapsesx@users.noreply.github.com": "synapsesx",
     "157689911+itsflownium@users.noreply.github.com": "itsflownium",
     "dirtyren@users.noreply.github.com": "dirtyren",
+    "237263164+ft-ioxcs@users.noreply.github.com": "ft-ioxcs",
     "tharushkadinujaya05@gmail.com": "0xneobyte",
     "138671361+Veritas-7@users.noreply.github.com": "Veritas-7",
+    "keiron@onehanded.com": "kmccammon",
+    "268233388+CiarasClaws@users.noreply.github.com": "CiarasClaws",
+    "amy@ravenwolf.de": "WolframRavenwolf",
+    "github.com@wolfram.ravenwolf.de": "WolframRavenwolf",
     "895252509@qq.com": "895252509",
     "35259607+zxcasongs@users.noreply.github.com": "zxcasongs",
     "alfred@my-cloud.me": "alfred-smith-0",
@@ -1315,6 +1324,7 @@ AUTHOR_MAP = {
     "agentsmithlaor@gmail.com": "oferlaor",  # PR #22356 salvage (cron origin sender identity)
     "jhin.lee@unity3d.com": "leehack",  # PR #22053 salvage (telegram DM topic reply fallback)
     "caojiguang@gmail.com": "caojiguang",  # PR #35117 carries #31853 (weixin _api_post/_api_get wait_for)
+    "gooku94123@gmail.com": "goku94123",  # PR #46609 salvage (MiniMax reasoning extra_body)
     # pander: empty email, salvaged via PR #19665 from #16126 by @ms-alan
     "ayman.a.kamal@hotmail.com": "A-kamal",  # PR #18678 (xAI image resolution fix)
     # Kanban bug-fix batch salvage (May 2026)
