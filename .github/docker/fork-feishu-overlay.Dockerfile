@@ -18,7 +18,8 @@ for spec in feishu_specs:
     print(spec)
 PY
 
-RUN /opt/hermes/.venv/bin/pip install --no-cache-dir \
+RUN uv pip install --python /opt/hermes/.venv/bin/python \
+        --no-cache \
         -r /tmp/fork-feishu-requirements.txt && \
     rm -f /tmp/fork-feishu-requirements.txt && \
     chown -R root:root /opt/hermes && \
