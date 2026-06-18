@@ -38,21 +38,40 @@ jobs:
           image_name_lower="$(printf '%s' "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
           echo "image_name=${image_name_lower}" >> "$GITHUB_OUTPUT"
 
-      - name: Build image for smoke test
+      - name: Build upstream-compatible base image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
           file: Dockerfile
           load: true
           platforms: linux/amd64
-          tags: ${{ steps.image.outputs.image_name }}:test
+          tags: ${{ steps.image.outputs.image_name }}:base
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
+
+      - name: Build fork overlay image
+        shell: bash
+        run: |
+          docker build \
+            --file .github/docker/fork-feishu-overlay.Dockerfile \
+            --build-arg BASE_IMAGE="${{ steps.image.outputs.image_name }}:base" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --tag "${{ steps.image.outputs.image_name }}:test" \
+            .
 
       - name: Smoke test image
         uses: ./.github/actions/hermes-smoke-test
         with:
           image: ${{ steps.image.outputs.image_name }}:test
+
+      - name: Verify Feishu SDK is present
+        shell: bash
+        run: |
+          docker run --rm \
+            --entrypoint /opt/hermes/.venv/bin/python \
+            "${{ steps.image.outputs.image_name }}:test" \
+            -c "import lark_oapi, qrcode"
 
       - name: Compute image tags
         id: tags
@@ -69,20 +88,14 @@ jobs:
         env:
           IMAGE_NAME_LOWER: ${{ steps.image.outputs.image_name }}
 
-      - name: Build and push image
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ steps.tags.outputs.tag_main }}
-            ${{ steps.tags.outputs.tag_latest }}
-            ${{ steps.tags.outputs.tag_sha }}
-            ${{ steps.tags.outputs.tag_sha_short }}
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          build-args: |
-            HERMES_GIT_SHA=${{ github.sha }}
+      - name: Tag and push overlay image
+        shell: bash
+        run: |
+          for tag in \
+            "${{ steps.tags.outputs.tag_main }}" \
+            "${{ steps.tags.outputs.tag_latest }}" \
+            "${{ steps.tags.outputs.tag_sha }}" \
+            "${{ steps.tags.outputs.tag_sha_short }}"; do
+            docker tag "${{ steps.image.outputs.image_name }}:test" "${tag}"
+            docker push "${tag}"
+          done
