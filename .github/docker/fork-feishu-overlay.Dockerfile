@@ -5,16 +5,18 @@ USER root
 WORKDIR /opt/hermes
 
 # Fork-only overlay: keep tracking the upstream Dockerfile while still
-# preinstalling the Feishu SDK into the immutable runtime venv.
+# preinstalling every runtime lazy dependency into the immutable venv.
 RUN python3 - <<'PY' > /tmp/fork-feishu-requirements.txt
-import tomllib
-from pathlib import Path
+from tools.lazy_deps import LAZY_DEPS
 
-data = tomllib.loads(Path("/opt/hermes/pyproject.toml").read_text())
-feishu_specs = data["project"]["optional-dependencies"].get("feishu")
-if not feishu_specs:
-    raise SystemExit("pyproject.toml is missing project.optional-dependencies.feishu")
-for spec in feishu_specs:
+specs = dict.fromkeys(
+    spec
+    for feature_specs in LAZY_DEPS.values()
+    for spec in feature_specs
+)
+if not specs:
+    raise SystemExit("tools.lazy_deps.LAZY_DEPS is empty")
+for spec in specs:
     print(spec)
 PY
 

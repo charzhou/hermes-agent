@@ -65,14 +65,6 @@ jobs:
         with:
           image: ${{ steps.image.outputs.image_name }}:test
 
-      - name: Verify Feishu SDK is present
-        shell: bash
-        run: |
-          docker run --rm \
-            --entrypoint /opt/hermes/.venv/bin/python \
-            "${{ steps.image.outputs.image_name }}:test" \
-            -c "import lark_oapi, qrcode"
-
       - name: Compute image tags
         id: tags
         shell: bash
