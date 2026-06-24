@@ -15,7 +15,13 @@ env:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - standard
+          - aio
 
     steps:
       - name: Checkout code
@@ -49,7 +55,7 @@ jobs:
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
 
-      - name: Build fork overlay image
+      - name: Build standard fork overlay image
         shell: bash
         run: |
           docker build \
@@ -57,13 +63,32 @@ jobs:
             --build-arg BASE_IMAGE="${{ steps.image.outputs.image_name }}:base" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
-            --tag "${{ steps.image.outputs.image_name }}:test" \
+            --tag "${{ steps.image.outputs.image_name }}:test-standard" \
             .
 
-      - name: Smoke test image
+      - name: Build aio fork overlay image
+        if: matrix.variant == 'aio'
+        shell: bash
+        run: |
+          docker build \
+            --file .github/docker/fork-aio-overlay.Dockerfile \
+            --build-arg BASE_IMAGE="${{ steps.image.outputs.image_name }}:test-standard" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --tag "${{ steps.image.outputs.image_name }}:test-aio" \
+            .
+
+      - name: Smoke test standard image
+        if: matrix.variant == 'standard'
         uses: ./.github/actions/hermes-smoke-test
         with:
-          image: ${{ steps.image.outputs.image_name }}:test
+          image: ${{ steps.image.outputs.image_name }}:test-standard
+
+      - name: Smoke test aio image
+        if: matrix.variant == 'aio'
+        uses: ./.github/actions/hermes-aio-smoke-test
+        with:
+          image: ${{ steps.image.outputs.image_name }}:test-aio
 
       - name: Compute image tags
         id: tags
@@ -71,23 +96,31 @@ jobs:
         run: |
           short_sha="${GITHUB_SHA::12}"
           short_sha6="${GITHUB_SHA::6}"
+          suffix=""
+          if [ "${{ matrix.variant }}" = "aio" ]; then
+            suffix="-aio"
+          fi
           {
-            echo "tag_main=${IMAGE_NAME_LOWER}:main"
-            echo "tag_latest=${IMAGE_NAME_LOWER}:latest"
-            echo "tag_sha=${IMAGE_NAME_LOWER}:sha-${short_sha}"
-            echo "tag_sha_short=${IMAGE_NAME_LOWER}:${short_sha6}"
+            echo "tag_main=${IMAGE_NAME_LOWER}:main${suffix}"
+            echo "tag_latest=${IMAGE_NAME_LOWER}:latest${suffix}"
+            echo "tag_sha=${IMAGE_NAME_LOWER}:sha-${short_sha}${suffix}"
+            echo "tag_sha_short=${IMAGE_NAME_LOWER}:${short_sha6}${suffix}"
           } >> "$GITHUB_OUTPUT"
         env:
           IMAGE_NAME_LOWER: ${{ steps.image.outputs.image_name }}
 
-      - name: Tag and push overlay image
+      - name: Tag and push variant image
         shell: bash
         run: |
+          source_tag="${{ steps.image.outputs.image_name }}:test-standard"
+          if [ "${{ matrix.variant }}" = "aio" ]; then
+            source_tag="${{ steps.image.outputs.image_name }}:test-aio"
+          fi
           for tag in \
             "${{ steps.tags.outputs.tag_main }}" \
             "${{ steps.tags.outputs.tag_latest }}" \
             "${{ steps.tags.outputs.tag_sha }}" \
             "${{ steps.tags.outputs.tag_sha_short }}"; do
-            docker tag "${{ steps.image.outputs.image_name }}:test" "${tag}"
+            docker tag "${source_tag}" "${tag}"
             docker push "${tag}"
           done

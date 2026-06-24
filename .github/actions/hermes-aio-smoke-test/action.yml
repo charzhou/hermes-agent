@@ -1,0 +1,160 @@
+name: Hermes AIO smoke test
+description: >
+  Validate the fork aio image variant in disabled-by-default and enabled modes.
+
+inputs:
+  image:
+    description: Fully-qualified image tag
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure /tmp/hermes-test is writable
+      shell: bash
+      run: |
+        mkdir -p /tmp/hermes-test
+        sudo chown -R 10000:10000 /tmp/hermes-test
+
+    - name: AIO disabled by default
+      shell: bash
+      run: |
+        set -euo pipefail
+        cid="$(docker run -d -v /tmp/hermes-test:/opt/data "${{ inputs.image }}" sleep infinity)"
+        cleanup() {
+          docker rm -f "$cid" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+
+        for _ in $(seq 1 30); do
+          if docker exec "$cid" true >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+
+        if docker exec "$cid" curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then
+          echo "AIO public ingress unexpectedly reachable while disabled" >&2
+          exit 1
+        fi
+
+    - name: Hermes behavior still works on aio image
+      shell: bash
+      run: |
+        docker run --rm \
+          -v /tmp/hermes-test:/opt/data \
+          "${{ inputs.image }}" --help >/tmp/hermes-aio-help.txt
+        rg -n "Hermes|usage|Usage" /tmp/hermes-aio-help.txt
+
+    - name: Hermes dashboard command still works on aio image
+      shell: bash
+      run: |
+        docker run --rm \
+          -v /tmp/hermes-test:/opt/data \
+          "${{ inputs.image }}" dashboard --help >/tmp/hermes-aio-dashboard-help.txt
+        rg -n "dashboard|Dashboard|usage|Usage" /tmp/hermes-aio-dashboard-help.txt
+
+    - name: AIO API and workspace bridge
+      shell: bash
+      run: |
+        set -euo pipefail
+        cid="$(docker run -d \
+          -v /tmp/hermes-test:/opt/data \
+          -e HERMES_AIO_ENABLE=1 \
+          -e HERMES_AIO_API_ENABLE=1 \
+          "${{ inputs.image }}" sleep infinity)"
+        cleanup() {
+          docker rm -f "$cid" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+
+        for _ in $(seq 1 60); do
+          if docker exec "$cid" curl -fsS http://127.0.0.1:18080/v1/sandbox >/tmp/aio-sandbox.json 2>/dev/null; then
+            break
+          fi
+          sleep 1
+        done
+        rg -n '"version"|version' /tmp/aio-sandbox.json
+
+        docker exec "$cid" sh -lc 'mkdir -p /opt/data/workspace && printf bridge-from-hermes > /opt/data/workspace/bridge.txt'
+        docker exec "$cid" sh -lc "curl -fsS -X POST http://127.0.0.1:18080/v1/file/read -H 'content-type: application/json' -d '{\"file\":\"/opt/data/workspace/bridge.txt\"}'" \
+          | rg -n 'bridge-from-hermes'
+
+    - name: Optional browser, terminal UI, and code-server stay disabled unless explicitly enabled
+      shell: bash
+      run: |
+        set -euo pipefail
+        cid="$(docker run -d \
+          -v /tmp/hermes-test:/opt/data \
+          -e HERMES_AIO_ENABLE=1 \
+          -e HERMES_AIO_API_ENABLE=1 \
+          "${{ inputs.image }}" sleep infinity)"
+        cleanup() {
+          docker rm -f "$cid" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+
+        for _ in $(seq 1 60); do
+          if docker exec "$cid" curl -fsS http://127.0.0.1:18080/v1/sandbox >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+
+        code_status="$(docker exec "$cid" sh -lc 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/code-server/ || true')"
+        if [ "$code_status" = 200 ] || [ "$code_status" = 302 ] || [ "$code_status" = 307 ]; then
+          echo "code-server unexpectedly reachable while disabled: $code_status" >&2
+          exit 1
+        fi
+
+        term_status="$(docker exec "$cid" sh -lc 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/terminal || true')"
+        if [ "$term_status" = 200 ] || [ "$term_status" = 302 ] || [ "$term_status" = 307 ]; then
+          echo "terminal UI unexpectedly reachable while disabled: $term_status" >&2
+          exit 1
+        fi
+
+        if docker exec "$cid" sh -lc "ps -ef | grep -q '[b]rowser-supervisor.py'"; then
+          echo "browser supervisor unexpectedly running while browser is disabled" >&2
+          exit 1
+        fi
+
+    - name: Browser, terminal UI, and code-server can be enabled explicitly
+      shell: bash
+      run: |
+        set -euo pipefail
+        cid="$(docker run -d \
+          -v /tmp/hermes-test:/opt/data \
+          -e HERMES_AIO_ENABLE=1 \
+          -e HERMES_AIO_API_ENABLE=1 \
+          -e HERMES_AIO_TERMINAL_ENABLE=1 \
+          -e HERMES_AIO_BROWSER_ENABLE=1 \
+          -e HERMES_AIO_CODE_SERVER_ENABLE=1 \
+          "${{ inputs.image }}" sleep infinity)"
+        cleanup() {
+          docker rm -f "$cid" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+
+        for _ in $(seq 1 60); do
+          if docker exec "$cid" curl -fsS http://127.0.0.1:18080/v1/sandbox >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+
+        for _ in $(seq 1 60); do
+          if docker exec "$cid" sh -lc "ps -ef | grep -q '[b]rowser-supervisor.py'"; then
+            break
+          fi
+          sleep 1
+        done
+
+        docker exec "$cid" curl -fsS http://127.0.0.1:18080/terminal | rg -n 'xterm|Terminal|terminal'
+        docker exec "$cid" curl -fsSI http://127.0.0.1:18080/vnc/index.html | rg -n 'HTTP/'
+        docker exec "$cid" sh -lc "ps -ef | grep '[b]rowser-supervisor.py'"
+
+        code_status="$(docker exec "$cid" sh -lc 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/code-server/ || true')"
+        if [ "$code_status" != 200 ] && [ "$code_status" != 302 ] && [ "$code_status" != 307 ]; then
+          echo "code-server did not become reachable: $code_status" >&2
+          exit 1
+        fi
