@@ -149,11 +149,19 @@ runs:
           sleep 1
         done
 
+        code_status=""
+        for _ in $(seq 1 60); do
+          code_status="$(docker exec "$cid" sh -lc 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/code-server/ || true')"
+          if [ "$code_status" = 200 ] || [ "$code_status" = 302 ] || [ "$code_status" = 307 ]; then
+            break
+          fi
+          sleep 1
+        done
+
         docker exec "$cid" curl -fsS http://127.0.0.1:18080/terminal | rg -n 'xterm|Terminal|terminal'
         docker exec "$cid" curl -fsSI http://127.0.0.1:18080/vnc/index.html | rg -n 'HTTP/'
         docker exec "$cid" sh -lc "ps -ef | grep '[b]rowser-supervisor.py'"
 
-        code_status="$(docker exec "$cid" sh -lc 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/code-server/ || true')"
         if [ "$code_status" != 200 ] && [ "$code_status" != 302 ] && [ "$code_status" != 307 ]; then
           echo "code-server did not become reachable: $code_status" >&2
           exit 1

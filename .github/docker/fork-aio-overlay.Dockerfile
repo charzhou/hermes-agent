@@ -17,20 +17,26 @@ COPY --from=hermes_base /package /package
 COPY --from=hermes_base /init /init
 COPY --from=hermes_base /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 COPY --from=hermes_base /usr/bin/docker /usr/bin/docker
-COPY --from=hermes_base /usr/include/olm /usr/include/olm
-COPY --from=hermes_base /usr/lib/aarch64-linux-gnu/libolm.so /usr/lib/aarch64-linux-gnu/libolm.so
-COPY --from=hermes_base /usr/lib/aarch64-linux-gnu/libolm.so.2 /usr/lib/aarch64-linux-gnu/libolm.so.2
-COPY --from=hermes_base /usr/lib/aarch64-linux-gnu/libolm.so.3 /usr/lib/aarch64-linux-gnu/libolm.so.3
-COPY --from=hermes_base /usr/lib/aarch64-linux-gnu/libolm.so.3.2.16 /usr/lib/aarch64-linux-gnu/libolm.so.3.2.16
-COPY --from=hermes_base /usr/lib/aarch64-linux-gnu/pkgconfig/olm.pc /usr/lib/aarch64-linux-gnu/pkgconfig/olm.pc
-COPY --from=hermes_base /usr/lib/aarch64-linux-gnu/cmake/Olm /usr/lib/aarch64-linux-gnu/cmake/Olm
 
 RUN --mount=type=bind,from=hermes_base,source=/root/.cache/uv,target=/mnt/hermes-uv-cache,readonly \
+    --mount=type=bind,from=hermes_base,source=/usr,target=/mnt/hermes-usr,readonly \
     --mount=type=cache,target=/root/.cache/uv <<'EOF'
 set -eu
 
 mkdir -p /root/.cache/uv
 cp -a /mnt/hermes-uv-cache/. /root/.cache/uv/ 2>/dev/null || true
+
+mkdir -p /usr/include
+cp -a /mnt/hermes-usr/include/olm /usr/include/
+
+find /mnt/hermes-usr/lib -maxdepth 5 \
+  \( -name 'libolm.so*' -o -path '*/pkgconfig/olm.pc' -o -path '*/cmake/Olm' \) \
+  | while IFS= read -r src; do
+    rel="${src#/mnt/hermes-usr/}"
+    dest="/${rel}"
+    mkdir -p "$(dirname "$dest")"
+    cp -a "$src" "$dest"
+  done
 
 if ! getent group hermes >/dev/null 2>&1; then
     groupadd -g 10000 hermes
