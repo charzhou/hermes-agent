@@ -78,11 +78,24 @@ jobs:
             --tag "${{ steps.image.outputs.image_name }}:test-aio" \
             .
 
+      - name: Ensure /tmp/hermes-test is hermes-writable
+        if: matrix.variant == 'standard'
+        shell: bash
+        run: |
+          mkdir -p /tmp/hermes-test
+          sudo chown -R 10000:10000 /tmp/hermes-test
+
       - name: Smoke test standard image
         if: matrix.variant == 'standard'
-        uses: ./.github/actions/hermes-smoke-test
-        with:
-          image: ${{ steps.image.outputs.image_name }}:test-standard
+        shell: bash
+        run: |
+          docker run --rm \
+            -v /tmp/hermes-test:/opt/data \
+            "${{ steps.image.outputs.image_name }}:test-standard" --help
+
+          docker run --rm \
+            -v /tmp/hermes-test:/opt/data \
+            "${{ steps.image.outputs.image_name }}:test-standard" dashboard --help
 
       - name: Smoke test aio image
         if: matrix.variant == 'aio'

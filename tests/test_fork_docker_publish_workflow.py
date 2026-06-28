@@ -52,3 +52,21 @@ class TestForkDockerPublishWorkflow:
         assert 'short_sha="${GITHUB_SHA::12}"' in content
         assert 'short_sha6="${GITHUB_SHA::6}"' in content
         assert 'tag_sha_short=${IMAGE_NAME_LOWER}:${short_sha6}' in content
+
+    def test_local_actions_exist(self):
+        parsed = yaml.safe_load(self.WORKFLOW_PATH.read_text(encoding="utf-8"))
+        steps = parsed["jobs"]["build-and-publish"]["steps"]
+
+        for step in steps:
+            uses = step.get("uses")
+            if not uses or not str(uses).startswith("./"):
+                continue
+
+            action_dir = REPO_ROOT / str(uses)[2:]
+            has_entrypoint = any(
+                (action_dir / name).exists()
+                for name in ("action.yml", "action.yaml", "Dockerfile")
+            )
+            assert has_entrypoint, (
+                f"Local action path is missing an entrypoint: {action_dir}"
+            )
