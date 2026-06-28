@@ -2259,6 +2259,15 @@ def run_conversation(
                     # "unknown variant `image_url`, expected `text`".
                     "unknown variant `image_url`, expected `text`",
                     "unknown variant image_url, expected text",
+                    # OpenRouter routes a request to upstream endpoints and,
+                    # when none of the candidate endpoints for the model accept
+                    # image input, returns HTTP 404 "No endpoints found that
+                    # support image input". Without this phrase the agent never
+                    # strips the images, the retry loop re-sends the same
+                    # rejected request until exhaustion, and the gateway leaves
+                    # every subsequent message queued behind the stuck turn —
+                    # the P1 in issue #21160. The 404 passes the 4xx gate below.
+                    "no endpoints found that support image input",
                 )
                 _err_lower = _err_body.lower()
                 _looks_like_image_rejection = any(
@@ -2844,15 +2853,25 @@ def run_conversation(
                     # Fall through to normal error handling if compression
                     # is exhausted or didn't help.
 
-                # Eager fallback for rate-limit errors (429 or quota exhaustion).
-                # When a fallback model is configured, switch immediately instead
-                # of burning through retries with exponential backoff -- the
-                # primary provider won't recover within the retry window.
+                # Eager fallback for rate-limit errors (429 or quota exhaustion)
+                # and transport errors (connection failure / timeout / provider
+                # overloaded).  Rate limits and billing: switch immediately —
+                # the primary provider won't recover within the retry window.
+                # Transport errors: allow 1 retry first (transient hiccups
+                # recover), then fall back if the provider is truly unreachable.
                 is_rate_limited = classified.reason in {
                     FailoverReason.rate_limit,
                     FailoverReason.billing,
                 }
-                if is_rate_limited and agent._fallback_index < len(agent._fallback_chain):
+                _is_transport_failure = classified.reason in {
+                    FailoverReason.timeout,
+                    FailoverReason.overloaded,
+                }
+                _should_fallback = (
+                    is_rate_limited
+                    or (_is_transport_failure and retry_count >= 2)
+                )
+                if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
                     # Don't eagerly fallback if credential pool rotation may
                     # still recover.  See _pool_may_recover_from_rate_limit
                     # for the single-credential-pool and CloudCode-quota
@@ -2866,6 +2885,10 @@ def run_conversation(
                         if classified.reason == FailoverReason.billing:
                             agent._buffer_status(
                                 "⚠️ Billing or credits exhausted — switching to fallback provider..."
+                            )
+                        elif _is_transport_failure:
+                            agent._buffer_status(
+                                "⚠️ Provider unreachable — switching to fallback provider..."
                             )
                         else:
                             agent._buffer_status("⚠️ Rate limited — switching to fallback provider...")

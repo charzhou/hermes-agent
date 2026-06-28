@@ -305,8 +305,29 @@ def _gateway_loop_exception_handler(
 
 
 def _redact_gateway_user_facing_secrets(text: str) -> str:
-    """Best-effort secret redaction before text can leave the gateway."""
+    """Secret redaction before text can leave the gateway.
+
+    Delegates to the authoritative ``agent.redact.redact_sensitive_text`` — the
+    same Tirith-grade redactor already applied to logs, tool output, and
+    approval-command prompts — so the outbound chat path masks the full
+    credential set the startup banner promises ("chat responses are scrubbed
+    before delivery"), not a divergent subset. ``force=True`` honors redaction
+    even when ``security.redact_secrets`` is off, matching the
+    ``_redact_approval_command`` reasoning (#23810).
+
+    The narrow ``_GATEWAY_SECRET_PATTERNS`` set runs as a belt-and-suspenders
+    second pass so nothing the gateway historically caught can regress, and so
+    redaction still degrades gracefully if the import ever fails.
+    """
     redacted = str(text or "")
+    try:
+        from agent.redact import redact_sensitive_text
+
+        redacted = redact_sensitive_text(redacted, force=True)
+    except Exception:
+        # Fail-soft: fall back to the local pattern pass below rather than
+        # letting a redactor import/error leak the raw text to chat.
+        pass
     for pattern in _GATEWAY_SECRET_PATTERNS:
         redacted = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "[REDACTED]", redacted)
     return redacted
@@ -3105,6 +3126,60 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "Defensive %s disconnect after failed connect raised: %s",
                 platform.value if platform is not None else "adapter",
                 e,
+            )
+
+    async def _bounded_adapter_teardown(
+        self, adapter, platform, *, profile: Optional[str] = None
+    ) -> None:
+        """Tear down one adapter on the shutdown path with bounded awaits.
+
+        Both ``cancel_background_tasks()`` and ``disconnect()`` can block
+        indefinitely when a platform's network state is half-dead (e.g. a
+        wedged Feishu/Lark WebSocket thread waiting on I/O). An unbounded
+        await here stalls the entire shutdown sequence past systemd's
+        ``TimeoutStopSec``; the resulting SIGKILL skips ``atexit`` PID-file
+        cleanup, so the next start dies with "PID file race lost" (#14128).
+
+        Each await is wrapped in the existing per-adapter timeout budget
+        (``HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT``). On timeout we log
+        and force forward progress; the loop never hangs regardless of any
+        adapter's internal behavior. Never raises.
+        """
+        timeout = self._adapter_disconnect_timeout_secs()
+        suffix = f" (profile: {profile})" if profile else ""
+        started_at = time.monotonic()
+        try:
+            if timeout <= 0:
+                await adapter.cancel_background_tasks()
+            else:
+                await asyncio.wait_for(
+                    adapter.cancel_background_tasks(), timeout=timeout
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "✗ %s background-task cancel timed out after %.1fs - forcing continue%s",
+                platform.value, timeout, suffix,
+            )
+        except Exception as e:
+            logger.debug("✗ %s background-task cancel error%s: %s", platform.value, suffix, e)
+        try:
+            if timeout <= 0:
+                await adapter.disconnect()
+            else:
+                await asyncio.wait_for(adapter.disconnect(), timeout=timeout)
+            logger.info(
+                "✓ %s disconnected (%.2fs)%s",
+                platform.value, time.monotonic() - started_at, suffix,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "✗ %s disconnect timed out after %.1fs - forcing continue%s",
+                platform.value, timeout, suffix,
+            )
+        except Exception as e:
+            logger.error(
+                "✗ %s disconnect error after %.2fs%s: %s",
+                platform.value, time.monotonic() - started_at, suffix, e,
             )
 
     def _adapter_disconnect_timeout_secs(self) -> float:
@@ -7222,38 +7297,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     self._cleanup_agent_resources(_agent)
 
             for platform, adapter in list(self.adapters.items()):
-                _adapter_started_at = time.monotonic()
-                try:
-                    await adapter.cancel_background_tasks()
-                except Exception as e:
-                    logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
-                try:
-                    await adapter.disconnect()
-                    logger.info(
-                        "✓ %s disconnected (%.2fs)",
-                        platform.value,
-                        time.monotonic() - _adapter_started_at,
-                    )
-                except Exception as e:
-                    logger.error(
-                        "✗ %s disconnect error after %.2fs: %s",
-                        platform.value,
-                        time.monotonic() - _adapter_started_at,
-                        e,
-                    )
+                await self._bounded_adapter_teardown(adapter, platform)
 
             # Disconnect secondary-profile adapters (multiplex mode).
             for _prof, _amap in list(getattr(self, "_profile_adapters", {}).items()):
                 for platform, adapter in list(_amap.items()):
-                    try:
-                        await adapter.cancel_background_tasks()
-                    except Exception as e:
-                        logger.debug("✗ %s bg-cancel error (profile %s): %s", platform.value, _prof, e)
-                    try:
-                        await adapter.disconnect()
-                        logger.info("✓ %s disconnected (profile: %s)", platform.value, _prof)
-                    except Exception as e:
-                        logger.error("✗ %s disconnect error (profile %s): %s", platform.value, _prof, e)
+                    await self._bounded_adapter_teardown(
+                        adapter, platform, profile=_prof
+                    )
                 _amap.clear()
             if hasattr(self, "_profile_adapters"):
                 self._profile_adapters.clear()
