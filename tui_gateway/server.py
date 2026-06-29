@@ -278,6 +278,8 @@ class _SlashWorker:
             argv += ["--model", model]
 
         self._closed = False
+        from hermes_cli._subprocess_compat import windows_hide_flags
+
         self.proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
@@ -289,6 +291,7 @@ class _SlashWorker:
             # slash_worker runs the Hermes agent → needs provider credentials.
             # Tier-1 secrets (gateway/GitHub/infra) are still stripped (#29157).
             env=hermes_subprocess_env(inherit_credentials=True),
+            creationflags=windows_hide_flags(),
         )
         threading.Thread(target=self._drain_stdout, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
@@ -9123,8 +9126,13 @@ def _(rid, params: dict) -> dict:
             "-f", str(first_page), "-l", str(last_page),
             str(pdf_path), str(out_prefix),
         ]
+        from hermes_cli._subprocess_compat import windows_hide_flags
+
         try:
-            res = subprocess.run(argv, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+            res = subprocess.run(
+                argv, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+                creationflags=windows_hide_flags(),
+            )
         except subprocess.TimeoutExpired:
             return _err(rid, 5028, "pdftoppm timed out (>120s)")
         if res.returncode != 0:
@@ -11668,6 +11676,9 @@ def _list_repo_files(root: str) -> list[str]:
             return cached[1]
 
     files: list[str] = []
+    from hermes_cli._subprocess_compat import windows_hide_flags
+
+    _creationflags = windows_hide_flags()
     try:
         top_result = subprocess.run(
             ["git", "-C", root, "rev-parse", "--show-toplevel"],
@@ -11675,6 +11686,7 @@ def _list_repo_files(root: str) -> list[str]:
             timeout=2.0,
             check=False,
             stdin=subprocess.DEVNULL,
+            creationflags=_creationflags,
         )
         if top_result.returncode == 0:
             top = top_result.stdout.decode("utf-8", "replace").strip()
@@ -11693,6 +11705,7 @@ def _list_repo_files(root: str) -> list[str]:
                 timeout=2.0,
                 check=False,
                 stdin=subprocess.DEVNULL,
+                creationflags=_creationflags,
             )
             if list_result.returncode == 0:
                 for p in list_result.stdout.decode("utf-8", "replace").split("\0"):
