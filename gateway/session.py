@@ -783,11 +783,18 @@ def sanitize_model_override(override: Optional[Dict[str, Any]]) -> Optional[Dict
             if isinstance(value, bool):
                 cleaned[key] = value
             continue
-        if key in {
-            "responses_ws_ping_interval_seconds",
-            "responses_ws_ping_timeout_seconds",
-        }:
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        if key in {"responses_ws_ping_interval_seconds", "responses_ws_ping_timeout_seconds"}:
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and (
+                    value > 0
+                    or (
+                        key == "responses_ws_ping_interval_seconds"
+                        and value == 0
+                    )
+                )
+            ):
                 cleaned[key] = float(value)
             continue
         cleaned[key] = str(value)

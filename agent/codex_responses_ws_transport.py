@@ -100,15 +100,26 @@ def normalize_responses_transport(value: Any) -> str:
     return transport if transport in VALID_TRANSPORTS else "sse"
 
 
-def normalize_responses_ws_keepalive_seconds(value: Any, *, default: float) -> float:
-    """Return a positive keepalive duration or its safe default."""
+def normalize_responses_ws_keepalive_seconds(
+    value: Any, *, default: float, allow_zero: bool = False
+) -> float:
+    """Return a valid keepalive duration or its safe default.
+
+    A zero ping interval explicitly disables websocket protocol Ping frames.
+    Ping timeouts remain positive-only because they have no meaning without a
+    Ping interval.
+    """
     if isinstance(value, bool):
         return default
     try:
         duration = float(value)
     except (TypeError, ValueError):
         return default
-    return duration if math.isfinite(duration) and duration > 0 else default
+    if not math.isfinite(duration):
+        return default
+    if duration > 0 or (allow_zero and duration == 0):
+        return duration
+    return default
 
 
 def is_generic_codex_ws_eligible(*, provider: Any, base_url: Any, api_mode: Any) -> bool:

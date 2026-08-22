@@ -1526,8 +1526,14 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                         timeout=float(timeout),
                         idle_timeout=max(float(timeout), DEFAULT_IDLE_TIMEOUT_SECONDS),
                         recv_poll_timeout=DEFAULT_RECV_POLL_SECONDS,
-                        ping_interval=float(
-                            getattr(agent, "responses_ws_ping_interval_seconds", 30.0)
+                        ping_interval=(
+                            None
+                            if float(
+                                getattr(agent, "responses_ws_ping_interval_seconds", 30.0)
+                            ) == 0
+                            else float(
+                                getattr(agent, "responses_ws_ping_interval_seconds", 30.0)
+                            )
                         ),
                         ping_timeout=float(
                             getattr(agent, "responses_ws_ping_timeout_seconds", 90.0)

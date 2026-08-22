@@ -1570,15 +1570,17 @@ def _normalize_custom_provider_entry(
                 duration = float(value)
             except (TypeError, ValueError):
                 duration = 0.0
-        if math.isfinite(duration) and duration > 0:
+        allow_zero = key == "responses_ws_ping_interval_seconds"
+        if math.isfinite(duration) and (duration > 0 or (allow_zero and duration == 0)):
             normalized[key] = duration
         else:
             _warn_once_per_provider(
                 provider_key,
                 f"invalid:{key}",
-                "providers.%s: %s must be a positive number; using the default",
+                "providers.%s: %s must be a positive number%s; using the default",
                 provider_key or "?",
                 key,
+                " (or 0 to disable Ping)" if allow_zero else "",
             )
 
     # Per-provider extra HTTP headers (proxies, gateways, custom auth).

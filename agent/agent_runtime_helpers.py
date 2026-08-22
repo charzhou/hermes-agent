@@ -2870,6 +2870,7 @@ def switch_model(
         agent.responses_ws_ping_interval_seconds = normalize_responses_ws_keepalive_seconds(
             responses_ws_ping_interval_seconds,
             default=DEFAULT_RESPONSES_WS_PING_INTERVAL_SECONDS,
+            allow_zero=True,
         )
         agent.responses_ws_ping_timeout_seconds = normalize_responses_ws_keepalive_seconds(
             responses_ws_ping_timeout_seconds,

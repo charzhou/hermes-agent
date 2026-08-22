@@ -168,3 +168,9 @@ def test_sanitize_model_override():
         "responses_ws_ping_timeout_seconds": 150.0,
         "responses_transport_provider": "custom:relay",
     }
+
+
+def test_sanitize_model_override_preserves_disabled_responses_ws_ping():
+    override = dict(OVERRIDE, responses_ws_ping_interval_seconds=0.0)
+
+    assert sanitize_model_override(override)["responses_ws_ping_interval_seconds"] == 0.0

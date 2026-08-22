@@ -174,7 +174,7 @@ def test_providers_dict_responses_ws_keepalive_values_round_trip(monkeypatch):
     assert runtime["responses_ws_ping_timeout_seconds"] == 150.0
 
 
-def test_named_provider_invalid_responses_ws_keepalive_uses_defaults(monkeypatch):
+def test_named_provider_can_disable_responses_ws_ping(monkeypatch):
     from hermes_cli import config as cfg
     from hermes_cli import runtime_provider as rp
 
@@ -201,7 +201,7 @@ def test_named_provider_invalid_responses_ws_keepalive_uses_defaults(monkeypatch
 
     runtime = rp.resolve_runtime_provider(requested="relay")
 
-    assert runtime["responses_ws_ping_interval_seconds"] == 30.0
+    assert runtime["responses_ws_ping_interval_seconds"] == 0.0
     assert runtime["responses_ws_ping_timeout_seconds"] == 90.0
 
 
@@ -230,7 +230,7 @@ def test_normalize_custom_provider_entry_preserves_responses_ws_state():
     assert true_entry["responses_ws_ping_interval_seconds"] == 45.0
     assert true_entry["responses_ws_ping_timeout_seconds"] == 150.0
 
-    invalid_entry = _normalize_custom_provider_entry(
+    ping_disabled_entry = _normalize_custom_provider_entry(
         {
             "name": "relay",
             "base_url": "https://relay.example/v1",
@@ -238,8 +238,8 @@ def test_normalize_custom_provider_entry_preserves_responses_ws_state():
             "responses_ws_ping_timeout_seconds": False,
         }
     )
-    assert "responses_ws_ping_interval_seconds" not in invalid_entry
-    assert "responses_ws_ping_timeout_seconds" not in invalid_entry
+    assert ping_disabled_entry["responses_ws_ping_interval_seconds"] == 0.0
+    assert "responses_ws_ping_timeout_seconds" not in ping_disabled_entry
 
 
 @pytest.mark.parametrize(
@@ -1062,6 +1062,7 @@ def test_error_classifier_handles_generic_ws_errors():
     [
         (None, (30.0, 90.0)),
         ((45.0, 150.0), (45.0, 150.0)),
+        ((0.0, 90.0), (None, 90.0)),
     ],
 )
 def test_run_codex_stream_lazily_owns_stateful_session(

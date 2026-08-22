@@ -1378,7 +1378,7 @@ Rules:
 - Explicit `websocket` hard-fails on pre-start errors — use `auto` when you want safe fallback.
 - If `responses_ws_url` is omitted, Hermes derives it from `base_url` (`https`→`wss`, append `/responses` when missing).
 - `responses_ws_state: true` enables stateful reuse of the same Responses WebSocket session. Hermes only sends incremental follow-up requests when the non-input request body is unchanged and the new `input` is a strict append over the previous turn; otherwise it sends a full request on the reused socket.
-- Stateful WebSocket sessions use a 30-second ping interval and 90-second Pong deadline by default. Set `responses_ws_ping_interval_seconds` and `responses_ws_ping_timeout_seconds` to positive per-provider values when a relay needs a different keepalive window.
+- Stateful WebSocket sessions use a 30-second ping interval and 90-second Pong deadline by default. Set `responses_ws_ping_interval_seconds` and `responses_ws_ping_timeout_seconds` to positive per-provider values when a relay needs a different keepalive window. Set `responses_ws_ping_interval_seconds: 0` to disable protocol Ping for relays that fail long requests by not responding to Pong; Hermes still enforces its Responses event-idle timeout.
 - Hermes does **not** prewarm or probe the socket ahead of the first request. The connection is opened on demand by the first turn that actually uses the transport.
 - Stateful reuse is still bounded by the same post-send rule: once `response.create` has been sent, Hermes does not do a blind replay over SSE or another provider just because the upstream rejected the request afterward.
 
