@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from agent.prompt_builder import drain_truncation_warnings
+import pytest
+
 from agent.system_prompt import build_system_prompt, build_system_prompt_parts
 
 
@@ -56,6 +57,28 @@ def _captured_context_cwd(agent):
     return captured["cwd"]
 
 
+@pytest.mark.parametrize("stores", [(True, True), (False, True), (True, False), (False, False)])
+@pytest.mark.parametrize("names", [
+    set(), {"memory"}, {"memory", "skill_view", "skills_list"},
+    {"memory", "skill_view", "skills_list", "skill_manage"},
+])
+def test_memory_guidance_respects_available_writes(stores, names, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    agent = _make_agent(valid_tool_names=names, skip_context_files=True,
+                        _memory_enabled=stores[0], _user_profile_enabled=stores[1])
+    prompt = build_system_prompt(agent)
+    enabled = "memory" in names and any(stores)
+    assert ("Memory is the narrow exception" in prompt) == enabled
+    assert ("(skill_manage)" in prompt) == (enabled and "skill_manage" in names)
+    if enabled:
+        assert "EVERY session regardless of task" in prompt
+        assert "procedures and workflows belong in skills" in prompt
+        if "skill_manage" not in names:
+            assert "not in memory" in prompt
+    if enabled and not stores[0]:
+        assert "never target='memory'" in prompt
+
+
 class TestContextFileCwd:
     def test_none_when_terminal_cwd_unset(self, monkeypatch):
         # Unset → None, so discovery falls back to the launch dir inside
@@ -66,26 +89,6 @@ class TestContextFileCwd:
     def test_configured_dir_when_terminal_cwd_set(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         assert _captured_context_cwd(_make_agent()) == tmp_path
-
-    def test_32k_policy_requests_smaller_context_file_budget(self):
-        captured = {}
-
-        def fake_context_files(**kwargs):
-            captured.update(kwargs)
-            return ""
-
-        agent = _make_agent(
-            context_compressor=SimpleNamespace(context_length=32_768),
-            minimum_context_length=32_000,
-        )
-        with (
-            patch("agent.prompt_builder.load_soul_md", return_value=""),
-            patch("agent.prompt_builder.build_environment_hints", return_value=""),
-            patch("agent.prompt_builder.build_context_files_prompt", side_effect=fake_context_files),
-        ):
-            build_system_prompt_parts(agent)
-
-        assert captured["allow_below_default"] is True
 
     def test_desktop_launch_artifact_does_not_load_bundled_agents_md(
         self, monkeypatch, tmp_path
@@ -378,7 +381,6 @@ class TestNamedProfileHintIntegration:
 
 
 def test_build_system_prompt_records_stable_prefix():
-    drain_truncation_warnings()
     agent = _make_agent()
     with (
         patch("agent.prompt_builder.load_soul_md", return_value=""),
@@ -832,3 +834,4 @@ class TestConversationStartedTwoLine:
         vol = self._volatile(agent)
         assert "Conversation started:" not in vol
         assert "as of the last context rebuild" not in vol
+
