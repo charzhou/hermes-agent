@@ -37,6 +37,7 @@ _SESSION_VARS = (
     _SESSION_USER_NAME, _SESSION_SCOPE_ID, _SESSION_KEY, _SESSION_ID,
     _SESSION_UI_SESSION_ID, _SESSION_MESSAGE_ID, _SESSION_PROFILE,
     _BROWSER_CONTROL_PRINCIPAL, _BROWSER_CONTROL_TRANSPORT_FAMILY, _CRON_SESSION, _SESSION_PARENT_CHAT_ID,
+    _RUN_ID,
 ) = tuple(ContextVar(name, default=_UNSET) for name in (
     "HERMES_SESSION_PLATFORM", "HERMES_SESSION_SOURCE", "HERMES_SESSION_CHAT_ID",
     "HERMES_SESSION_CHAT_TYPE", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID",
@@ -44,7 +45,7 @@ _SESSION_VARS = (
     "HERMES_SESSION_SCOPE_ID", "HERMES_SESSION_KEY", "HERMES_SESSION_ID",
     "HERMES_UI_SESSION_ID", "HERMES_SESSION_MESSAGE_ID", "HERMES_SESSION_PROFILE",
     "HERMES_BROWSER_CONTROL_PRINCIPAL", "HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY",
-    "HERMES_CRON_SESSION", "HERMES_SESSION_PARENT_CHAT_ID",
+    "HERMES_CRON_SESSION", "HERMES_SESSION_PARENT_CHAT_ID", "HERMES_RUN_ID",
 ))
 
 # Whether this channel can route an ASYNC completion back AFTER the turn ends (see
@@ -105,6 +106,19 @@ def scoped_current_session_id(session_id: str | None = None) -> Iterator[None]:
         _SESSION_ID.set(previous)
 
 
+@contextmanager
+def scoped_session_platform(platform: str | None) -> Iterator[None]:
+    """Bind a turn platform only when the caller has no session surface."""
+    token = None
+    if _SESSION_PLATFORM.get() in (_UNSET, "") and platform and platform != "subagent":
+        token = _SESSION_PLATFORM.set(platform)
+    try:
+        yield
+    finally:
+        if token is not None:
+            _SESSION_PLATFORM.reset(token)
+
+
 def source_route_metadata(source: Any, metadata: dict | None) -> dict | None:
     """Keep inbound route anchors for durable deliveries after the source is gone."""
     anchors = {key: str(value) for key in ("scope_id", "parent_chat_id")
@@ -119,6 +133,7 @@ def set_session_vars(
     message_id: str = "", profile: str = "", browser_control_principal: str = "",
     browser_control_transport_family: str = "", cwd: str = "", async_delivery: bool = True,
     ui_session_id: str = "", cron_session: Any = _UNSET, parent_chat_id: str = "",
+    run_id: str = "",
     session_history_delivery: str | None = None,
 ) -> list:
     """Set all session context variables and return reset tokens.  Call
@@ -136,6 +151,7 @@ def set_session_vars(
         platform, source, chat_id, chat_type, chat_name, thread_id, user_id, user_id_alt,
         user_name, scope_id, session_key, session_id, ui_session_id, message_id, profile,
         browser_control_principal, browser_control_transport_family, cron_session, parent_chat_id,
+        run_id,
     )
     tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values)]
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))
