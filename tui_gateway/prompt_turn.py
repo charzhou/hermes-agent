@@ -16,6 +16,32 @@ from .method_ctx import HandlerRegistry, bind_module
 _registry = HandlerRegistry()
 
 
+def _bot_mode_delivery_text(response: Any, *, successful: bool) -> Any:
+    """Return the text Bot Mode may render or relay after a completed turn.
+
+    The gateway owns the canonical marker set.  Keep the row and completion
+    event intact, but make a successful bare marker invisible at every Bot
+    Mode delivery boundary.  Failed turns intentionally fail open so their
+    diagnostic text is never swallowed.
+    """
+    from gateway.response_filters import is_intentional_silence_response
+    return "" if successful and is_intentional_silence_response(response) else response
+
+
+def _is_bot_mode_session(session: dict) -> bool:
+    """Whether this completion belongs to the canonical Bot Chat surface.
+
+    Same resolution as the system-prompt gate: the agent's title hint first (the DB
+    title lands after turn 1 and ``pending_title`` is cleared once it does), then the
+    live title from the session store.
+    """
+    from tools.bot_mode_probe import BOT_CHAT_TITLE
+    hint = str(getattr(session.get("agent"), "_session_title_hint", "") or "").strip()
+    if hint:  # any explicit hint decides; only an empty one costs a session-store read
+        return hint == BOT_CHAT_TITLE
+    return _session_live_title(session, _session_lookup_key(session)) == BOT_CHAT_TITLE
+
+
 def _hook_failure(what: str, exc: BaseException) -> None:
     print(f"[tui_gateway] {what} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
@@ -110,8 +136,23 @@ def _admit_prompt_turn(
         if not isinstance(inflight, dict) or inflight.get("status") == "error":
             _start_inflight_turn(session, text)
         agent = session["agent"]
-        with contextlib.suppress(Exception):
-            agent.clear_interrupt()
+        if agent is None:
+            session["running"] = False
+        else:
+            with contextlib.suppress(Exception):
+                agent.clear_interrupt()
+    if agent is None:
+        # A deferred build can finish without attaching an agent (its record was replaced or closed
+        # mid-build: ``agent_ready`` set, ``agent`` None, see ``_start_agent_build``).  Every turn source
+        # crosses this gate, so refuse here with a retryable frame: the turn body used to dereference the
+        # missing agent twice (in ``_invoke_agent`` and again in its ``finally``), which killed the turn
+        # thread with ``running`` still True — the prompt vanished and the session stayed "busy" (#111531).
+        reason = session.get("agent_error") or AGENT_MISSING_FOR_TURN
+        logger.info("Refusing turn for session %s: no agent attached (%s)", session.get("session_key") or sid, reason)
+        _emit_terminal_turn_error(
+            sid, session, reason,
+            error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
+        return None
     return images, agent
 
 
@@ -510,8 +551,19 @@ def _invoke_agent(
     turn_author: dict | None = None) -> None:
     """Wire the streaming callbacks and run the conversation into ``st.result``."""
     agent = st.agent
+    # Bot Chat mirrors gateway.stream_consumer: deltas are withheld while the streamed buffer
+    # could still resolve to a silence marker ("NO"->"NO_REPLY"), so a bare marker is never
+    # shown and then retracted (the client keeps streamed text when message.complete is "").
+    hold = {"buf": "", "held": ""} if _is_bot_mode_session(session) else None
 
     def _stream(delta):
+        if hold is not None and isinstance(delta, str):
+            from gateway.response_filters import is_partial_silence_marker
+            hold["buf"] += delta
+            if is_partial_silence_marker(hold["buf"]):
+                hold["held"] += delta
+                return
+            delta, hold["held"] = hold["held"] + delta, ""
         with session["history_lock"]:
             _append_inflight_delta(session, delta)
         payload = {"text": delta}
@@ -638,6 +690,8 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
         except Exception:
             _error_surface = None
     raw, status, last_reasoning = _turn_outcome(result, _error_surface)
+    if _is_bot_mode_session(session):
+        raw = _bot_mode_delivery_text(raw, successful=status == "complete")
     payload = {"text": raw, "usage": _get_usage(agent), "status": status}
     if last_reasoning:
         payload["reasoning"] = last_reasoning
@@ -790,6 +844,14 @@ def _run_prompt_submit(
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
     turn_author: dict | None = None) -> bool:
+    # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
+    # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
+    # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
+    # the token-accounting guard as an anonymous session (#111999).
+    if _ensure_session_db_row(session) is False:
+        logger.warning(
+            "prompt dispatch: session store unavailable for %s — this turn may not persist",
+            session.get("session_key") or sid)
     admitted = _admit_prompt_turn(sid, session, text, image_paths, queued_prompt_generation)
     if admitted is None:
         return False

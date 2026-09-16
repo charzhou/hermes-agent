@@ -268,8 +268,9 @@ def clear_session(session_key: str) -> None:
         _pending.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
     for entry in entries:
-        # Cancel blocked waits now so the old run unwinds instead of idling until timeout.
-        entry.result = "deny"
+        # Cancel blocked waits now so the old run unwinds instead of idling until timeout;
+        # the prompt was withdrawn, nobody denied it.
+        entry.cancelled = "the session ended before the prompt was answered"
         entry.event.set()
     _release_permission_mode_dependents(session_key)
     # Session-persistent code kernels (local and remote) share this owner key and die at the same boundary so a
@@ -330,6 +331,13 @@ def is_approved(session_key: str, pattern_key: str) -> bool:
     with _lock:
         approved = _permanent_set() | _session_approved.get(session_key, set())
     return any(alias in approved for alias in aliases)
+
+
+def _is_permanently_approved(pattern_key: str) -> bool:
+    """Permanent approval only, with compatibility for migrated pattern keys."""
+    aliases = _approval_key_aliases(pattern_key)
+    with _lock:
+        return any(alias in _permanent_set() for alias in aliases)
 
 
 def approve_permanent(pattern_key: str):
@@ -475,6 +483,7 @@ _USER_SUMMARIES = {
     "denied": "You denied this {noun} — it did not run.",
     "timeout": "No answer within {minutes} — the {noun} did not run.",
     "notify_failed": "The approval request could not be delivered — the {noun} did not run.",
+    "cancelled": "The approval prompt was withdrawn or never reached you — the {noun} did not run.",
     "blocked": "This {noun} is not allowed in an unattended session — it did not run.",
 }
 
@@ -618,11 +627,11 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
             subject, noun="dangerous commands",
             advice="Find an alternative approach that avoids this command.")}
 
-    is_dangerous, _pk, description = detect_dangerous_command(command)
-    if is_dangerous:
+    is_dangerous, pattern_key, description = detect_dangerous_command(command)
+    if is_dangerous and not _is_permanently_approved(pattern_key):
         result = block(f"Command flagged as dangerous ({description})")
         if ctx.name == "single_query":
-            result.update(pattern_key=_pk, description=description)
+            result.update(pattern_key=pattern_key, description=description)
         return result
     try:
         from tools.tirith_security import check_command_security
@@ -843,6 +852,12 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
             # halt — both produce a BLOCKED outcome. ``/deny <reason>`` free text is
             # relayed verbatim so the agent can adapt rather than only hearing "denied".
             choice, deny_reason = decision["choice"], decision.get("reason")
+            if decision.get("cancelled"):
+                # The prompt was withdrawn (turn interrupted or ended) before anyone answered:
+                # still fail closed, but do not attribute a refusal to the user.
+                return deny(spec.gateway_refused, "cancelled",
+                            reason=f"approval was withdrawn before the user answered ({decision['cancelled']})",
+                            reason_addendum="", timeout_addendum="", deny_reason=None)
             if not decision["resolved"]:
                 return deny(spec.gateway_refused, "timeout", reason="timed out without user response",
                             reason_addendum="", timeout_addendum=" Silence is not consent.",
@@ -879,6 +894,13 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     approval_context._fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
     if choice == "timeout":
         return deny(spec.cli_timeout, "timeout")
+    if choice == "cancelled":
+        # The prompt never reached a human (callback raised, no callback under prompt_toolkit, interrupted
+        # read): fail closed, but do not attribute a refusal to the user (#22992).
+        return deny(spec.gateway_refused, "cancelled",
+                    reason="was not approved: the approval prompt could not be delivered or was not answered "
+                           f"({getattr(choice, 'cause', 'no answer')})",
+                    reason_addendum="", timeout_addendum=" Silence is not consent.", deny_reason=None)
     if choice == "deny":
         # No _record_denial(): the breaker counts consecutive guardian LLM
         # DENY verdicts, not deliberate human denials.

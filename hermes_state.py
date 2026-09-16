@@ -27,7 +27,11 @@ from pathlib import Path
 from hermes_constants import get_hermes_home, mkdir_under_hermes_home
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, cast
 
-from hermes_state_common import escape_like as _escape_like, stat_db_file_identity as _stat_db_file_identity
+from hermes_state_common import (
+    TITLE_SOURCE_DERIVED as _TITLE_SOURCE_DERIVED, TITLE_SOURCE_LLM as _TITLE_SOURCE_LLM,
+    TITLE_SOURCE_USER as _TITLE_SOURCE_USER,
+    escape_like as _escape_like, stat_db_file_identity as _stat_db_file_identity,
+)
 from hermes_state_holders import read_only_db_uri
 from hermes_state_errors import (
     _DELETED_WAL_GENERATION_MSG, _DISK_IO_ERROR_MARKER, _STATE_DB_CORRUPT_MSG, _STATE_DB_GENERATION_KEY,
@@ -298,14 +302,20 @@ def _strip_background_review_harness(messages: List[Dict[str, Any]]) -> List[Dic
         return messages
     out: List[Dict[str, Any]] = []
     skip_next_assistant = False
+    previous_was_harness = False
     for msg in messages:
         if _is_background_review_harness_message(msg):
-            skip_next_assistant = True
+            # A consecutive harness prompt occupies the preceding prompt's
+            # immediate reply slot, so it must not arm another assistant skip.
+            skip_next_assistant = not previous_was_harness
+            previous_was_harness = True
             continue
         if skip_next_assistant:
             skip_next_assistant = False
             if isinstance(msg, dict) and msg.get("role") == "assistant":
+                previous_was_harness = False
                 continue  # the curator-mode reply to the harness prompt
+        previous_was_harness = False
         out.append(msg)
     return out
 
@@ -1480,14 +1490,16 @@ class SessionDB(
     _TOKEN_DELTA_COST_FIELDS = ("estimated_cost_usd", "actual_cost_usd")
     _TOKEN_DELTA_ROUTE_FIELDS = (
         "model", "cost_status", "cost_source", "pricing_version", "billing_provider", "billing_base_url",
-        "billing_mode",
+        "billing_mode", "source",
     )
 
     MAX_TITLE_LENGTH = 100
 
     # Title provenance, lowest to highest authority: auto-titling may only replace a
     # strictly lower-authority title (``derived`` -> ``llm`` once; never a user-typed name).
-    TITLE_SOURCE_DERIVED, TITLE_SOURCE_LLM, TITLE_SOURCE_USER = "derived", "llm", "user"
+    TITLE_SOURCE_DERIVED = _TITLE_SOURCE_DERIVED
+    TITLE_SOURCE_LLM = _TITLE_SOURCE_LLM
+    TITLE_SOURCE_USER = _TITLE_SOURCE_USER
     _TITLE_SOURCE_RANK = {TITLE_SOURCE_DERIVED: 0, TITLE_SOURCE_LLM: 1, TITLE_SOURCE_USER: 2}
 
     # Bot Mode's canonical chat is resolved by exact-title lookup: the title IS the identity,

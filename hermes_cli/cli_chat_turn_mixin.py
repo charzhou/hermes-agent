@@ -22,6 +22,11 @@ from typing import Optional
 class CLIChatTurnMixin:
     """chat() and its per-turn phase helpers."""
 
+    # Last completed turn's raw agent result. chat() returns only the rendered
+    # response string, so one-shot callers that must map an outcome onto a
+    # process exit code (see cli._run_single_query_mode) read this instead.
+    _last_turn_result = None
+
     def chat(self, message, images: list = None, voice_input: bool = False) -> Optional[str]:
         """Run one user turn; returns the agent's response, or None on error.
 
@@ -441,6 +446,7 @@ class CLIChatTurnMixin:
             self._prompt_duration = max(0.0, time.time() - self._prompt_start_time)
             self._prompt_start_time = None
         self._last_turn_finished_at = time.time()  # status bar idle time
+        self._last_turn_result = turn.result
         # AsyncOpenAI clients bound to the worker's now-closed loop would crash
         # prompt_toolkit's loop from __del__ on GC.
         try:
@@ -534,13 +540,27 @@ class CLIChatTurnMixin:
                         all_parts.append(extra)
                 except queue.Empty:
                     break
-            combined = "\n".join(all_parts)
+            # Payloads may be (text, images) tuples when the message carried image
+            # attachments (bundled at cli_tui_mixin._tui_on_enter); unpack them here —
+            # "\n".join(all_parts) raises TypeError on a tuple and the outer
+            # handler swallows it, silently dropping the interrupt (#110737).
+            text_parts: list[str] = []
+            image_parts: list = []
+            for part in all_parts:
+                if isinstance(part, tuple):
+                    part_text, part_images = part
+                    text_parts.append(part_text)
+                    image_parts.extend(part_images or [])
+                else:
+                    text_parts.append(part)
+            combined = "\n".join(text_parts)
+            payload = (combined, image_parts) if image_parts else combined
             preview = combined[:50] + ("..." if len(combined) > 50 else "")
             if len(all_parts) > 1:
                 print(f"\n⚡ Sending {len(all_parts)} messages after interrupt: '{preview}'")
             else:
                 print(f"\n⚡ Sending after interrupt: '{preview}'")
-            self._pending_input.put(combined)
+            self._pending_input.put(payload)
 
         # A /steer the agent finished before absorbing becomes the next user turn.
         _leftover_steer = turn.result.get("pending_steer") if turn.result else None

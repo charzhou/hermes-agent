@@ -212,16 +212,13 @@ class GatewayStartupMixin:
         ``_send_restart_notification`` and ``_redeliver_pending_obligations`` used to be awaited inline
         *before* ``_finish_startup_restore`` released the gate. See #91969.
         """
-        from gateway.run import _clear_planned_restart_notification, _startup_restore_drain_timeout_secs
+        from gateway.run import _startup_restore_drain_timeout_secs
         claimed = await self._claim_pending_obligations()
 
         async def _boot_sends() -> None:
             await self._send_restart_notification()
             if planned_restart_notification_pending:
-                try:
-                    await self._send_home_channel_startup_notifications(skip_targets=None)
-                finally:
-                    _clear_planned_restart_notification()
+                await self._replay_pending_planned_restart_notification()
             await self._redeliver_claimed_obligations(claimed)
 
         boot_task = asyncio.create_task(_boot_sends())
@@ -893,7 +890,26 @@ class GatewayStartupMixin:
                 send_relay_policy()
         except Exception:
             logger.warning("relay adapter registration failed at gateway startup", exc_info=True)
-        GatewayStartupMixin._register_config_hooks("shell-hook registration failed at gateway startup")
+        GatewayStartupMixin._register_launch_profile_config_hooks()
+
+    @staticmethod
+    def _register_launch_profile_config_hooks() -> None:
+        """The launch profile's ``hooks:`` block, registered under ITS runtime scope when multiplexing.
+
+        Startup runs before any turn scope exists and ``get_secret`` fails closed outside a scope
+        while multiplexing is on, so the launch profile needs the scope secondaries already get
+        (``_start_secondary_profile_adapters``) or its ``secret_env`` targets cannot resolve.
+        """
+        from agent.secret_scope import is_multiplex_active
+        if not is_multiplex_active():
+            GatewayStartupMixin._register_config_hooks(
+                "shell-hook/webhook registration failed at gateway startup", level=logging.WARNING)
+            return
+        from gateway.run import _profile_runtime_scope
+        from hermes_constants import get_process_hermes_home
+        with _profile_runtime_scope(get_process_hermes_home()):
+            GatewayStartupMixin._register_config_hooks(
+                "shell-hook/webhook registration failed at gateway startup", level=logging.WARNING)
 
     @staticmethod
     def _register_config_hooks(fail_fmt: str, *fail_args, level: int = logging.DEBUG) -> None:
@@ -1478,6 +1494,19 @@ class GatewayStartupMixin:
             platform == Platform.TELEGRAM and looks_like_telegram_private_chat_id(home_chat_id)
         )
         is_thread = bool(new_thread_id) and not is_telegram_private_chat
+        chat_type = "thread" if is_thread else "dm"
+        scope_id = None
+        if platform == Platform.TELEGRAM and not is_telegram_private_chat:
+            # The Telegram adapter keys forum-topic replies ``group:<chat>:<topic>`` (never
+            # ``thread``); bind the handoff on the same slot.
+            chat_type = "group"
+        if platform == Platform.SLACK:
+            # Slack keys a thread reply on the parent channel's type ("dm" for a D… channel, else
+            # "group") plus the workspace id — never on a "thread" slot. Mirror the adapter's inbound
+            # source shape or the first reply after a restart lands on a different key (#111896).
+            chat_type = "dm" if home_chat_id.startswith("D") else "group"
+            scope_for_chat = getattr(transport.adapter, "scope_id_for_chat", None)
+            scope_id = home.scope_id or (scope_for_chat(home_chat_id) if callable(scope_for_chat) else None)
         # Discord builds in-thread messages with ``chat_id == thread id``: key on the thread's OWN id.
         dest_source = SessionSource(
             platform=platform,
@@ -1485,9 +1514,10 @@ class GatewayStartupMixin:
                 is_thread and platform == Platform.DISCORD and effective_thread_id
             ) else home_chat_id,
             chat_name=home.name,
-            chat_type="thread" if is_thread else "dm",
+            chat_type=chat_type,
             user_id=home_chat_id if is_telegram_private_chat else "system:handoff",
             user_name="Handoff", thread_id=effective_thread_id, profile=profile_name,
+            scope_id=scope_id,
         )
         return self._HandoffDestination(
             platform=platform, platform_name=platform_name, transport=transport, home=home,
