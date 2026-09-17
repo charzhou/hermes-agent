@@ -219,6 +219,7 @@ def test_feasibility_check_passes_live_main_runtime():
             "api_key": "codex-token",
             "api_mode": "codex_responses",
             "auth_mode": "",
+            "session_id": "",
         },
     )
 

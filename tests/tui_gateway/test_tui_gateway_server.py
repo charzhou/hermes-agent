@@ -1178,6 +1178,24 @@ def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     assert server.write_json({"ok": True}) is False
 
 
+def test_write_json_unserializable_payload_becomes_error_frame(monkeypatch, caplog):
+    """The stdio twin of the WS guard (#92506): an unserializable result must reach the Ink TUI /
+    stdio bridge as a JSON-RPC error frame with the original id plus a log line, not kill the pool
+    worker silently while the client waits forever."""
+    import datetime
+    import logging
+
+    out = _ChunkyStdout()
+    monkeypatch.setattr(server, "_real_stdout", out)
+    with caplog.at_level(logging.ERROR, logger="tui_gateway.transport"):
+        assert server.write_json({"jsonrpc": "2.0", "id": "profiles",
+                                  "result": {"created": datetime.datetime(2026, 8, 22)}}) is True
+    frame = json.loads("".join(out.parts))
+    assert frame["id"] == "profiles" and frame["error"]["code"] == -32603
+    assert "datetime" in frame["error"]["message"]
+    assert "frame serialization failed" in caplog.text
+
+
 def test_write_json_drops_detached_ws_frames(monkeypatch):
     out = _ChunkyStdout()
     monkeypatch.setattr(server, "_real_stdout", out)
@@ -7118,7 +7136,7 @@ def test_prompt_submit_empty_truncation_allowed_with_confirm(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -11281,7 +11299,7 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -11321,7 +11339,7 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -12489,6 +12507,24 @@ def test_inflight_snapshot_carries_arrival_order_offsets():
     assert snapshot["correction_offsets"] == [len("Moving."), len("Moving.Still.")]
 
 
+def test_turn_admission_carries_synthetic_display_metadata_into_inflight_snapshot(monkeypatch):
+    """A reconnect must retain the typed synthetic user bubble (#112144)."""
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
+    agent = Mock()
+    session = {"agent": agent, "attached_images": [], "history_lock": threading.RLock()}
+    display_metadata = {"display_text": "Finished syncing the workspace"}
+
+    assert server._admit_prompt_turn(
+        "sid", session, "process completed", None, None, "process_complete", display_metadata,
+    ) == ([], agent)
+
+    snapshot = server._inflight_snapshot(session)
+
+    assert snapshot is not None
+    assert snapshot["display_kind"] == "process_complete"
+    assert snapshot["display_metadata"] == {"display_text": "Finished syncing the workspace"}
+
+
 def test_inflight_snapshot_omits_offsets_when_not_fully_recorded():
     """A pre-upgrade in-memory turn may carry corrections without offsets.
 
@@ -12746,7 +12782,7 @@ def test_prompt_submit_history_version_mismatch_surfaces_warning(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -12839,7 +12875,7 @@ def test_prompt_submit_merges_on_model_switch_marker(monkeypatch):
         return _is_model_switch_marker(entry)
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -12938,7 +12974,7 @@ def test_prompt_submit_merges_on_personality_pivot_marker(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -13049,7 +13085,7 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -13159,7 +13195,7 @@ def test_prompt_submit_can_truncate_before_user_ordinal(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -13323,7 +13359,7 @@ def test_prompt_submit_truncate_ordinal_skips_display_kind_rows(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -13423,7 +13459,7 @@ def test_prompt_submit_truncate_translates_display_prefix_ordinal(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -13712,7 +13748,7 @@ def test_run_prompt_submit_registers_turn_thread_for_interrupt(monkeypatch):
     calls = {"interrupted": False, "started": False}
 
     class _FakeThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self.target = target
 
         def start(self):
@@ -13783,7 +13819,7 @@ def test_interrupt_before_agent_ready_prevents_late_turn_start(monkeypatch):
     calls = {"run_prompt": 0}
 
     class _FakeThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self.target = target
             threads.append(self)
 
@@ -13853,7 +13889,7 @@ def test_cancelled_turn_before_agent_ready_emits_error_event(monkeypatch):
     calls = {"run_prompt": 0}
 
     class _FakeThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self.target = target
             threads.append(self)
 
@@ -13925,7 +13961,7 @@ def test_session_not_running_before_agent_ready_emits_error_event(monkeypatch):
     calls = {"run_prompt": 0}
 
     class _FakeThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self.target = target
             threads.append(self)
 
@@ -13991,7 +14027,7 @@ def test_slow_agent_build_delivers_prompt_instead_of_timing_out(monkeypatch):
     calls = {"run_prompt": 0}
 
     class _FakeThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self.target = target
             threads.append(self)
 
@@ -14067,7 +14103,7 @@ def test_slow_agent_build_emits_keyed_progress_notice(monkeypatch):
     calls = {"run_prompt": 0}
 
     class _FakeThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self.target = target
             threads.append(self)
 
@@ -14151,7 +14187,7 @@ def test_agent_build_failure_surfaces_error_and_drops_turn(monkeypatch):
     calls = {"run_prompt": 0}
 
     class _FakeThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self.target = target
             threads.append(self)
 
@@ -16798,7 +16834,7 @@ def test_model_options_refresh_allows_custom_provider_probes(monkeypatch):
 class _ImmediateThread:
     """Runs the target callable synchronously so assertions can follow."""
 
-    def __init__(self, target=None, daemon=None):
+    def __init__(self, target=None, daemon=None, **_thread_options):
         self._target = target
 
     def start(self):
@@ -18454,7 +18490,7 @@ def test_notification_poller_delivers_completion(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
         def start(self):
             self._target()
@@ -18522,7 +18558,7 @@ def test_notification_poller_skips_consumed(monkeypatch):
             return {"final_response": "ok", "messages": []}
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
         def start(self):
             self._target()
@@ -20949,7 +20985,7 @@ def test_prompt_submit_passes_persist_user_message_to_agent(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -20992,7 +21028,7 @@ def test_prompt_submit_releases_old_history_before_heap_trim(monkeypatch, tmp_pa
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -21373,7 +21409,7 @@ def test_personality_marker_does_not_shift_truncate_ordinal(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
@@ -21493,7 +21529,7 @@ def test_prompt_submit_truncation_archives_instead_of_deleting(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **_thread_options):
             self._target = target
 
         def start(self):
