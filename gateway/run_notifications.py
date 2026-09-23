@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
+from agent.interrupt_compat import _accepts_keyword
 from gateway.config import Platform, _BUILTIN_PLATFORM_VALUES
 from gateway.platforms.base import BasePlatformAdapter, _mark_notify_metadata
 from gateway.platforms.event import MessageEvent, MessageType
@@ -427,9 +428,15 @@ class GatewayNotificationsMixin:
                     and not getattr(stream_consumer, "_turn_split_delivery", False)
                 ):
                     try:
-                        _edit_res = await adapter.edit_message(
-                            chat_id=source.chat_id, message_id=_sc_msg_id, content=text_content, finalize=True,
-                        )
+                        _edit_kwargs = {
+                            "chat_id": source.chat_id,
+                            "message_id": _sc_msg_id,
+                            "content": text_content,
+                            "finalize": True,
+                        }
+                        if metadata and _accepts_keyword(adapter.edit_message, "metadata"):
+                            _edit_kwargs["metadata"] = metadata
+                        _edit_res = await adapter.edit_message(**_edit_kwargs)
                         if getattr(_edit_res, "success", False):
                             _reconciled = True
                             logger.info(

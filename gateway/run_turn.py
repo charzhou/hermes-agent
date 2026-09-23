@@ -23,6 +23,7 @@ from contextvars import copy_context
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome
+from gateway.platforms.delivery_metadata import delivery_metadata_for_event, merge_delivery_metadata
 from gateway.platforms.event import MessageEvent
 from gateway.response_filters import display_kind_for_event, is_machinery_display_kind
 from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
@@ -206,7 +207,8 @@ class GatewayTurnMixin:
                     skey or "", model, override_model, override_runtime.get("provider"),
                 )
                 return override_model, override_runtime
-            # No api_key on the override: env-based resolution below, override model/provider on top.
+            # No api_key on the override (credentials failed to re-resolve at rehydrate): resolve them
+            # for the override's own provider below, never layer it over the default provider's runtime.
             logger.debug(
                 "Session model override (no api_key, fallback): session=%s config_model=%s override_model=%s",
                 skey or "", model, override_model,
@@ -221,7 +223,19 @@ class GatewayTurnMixin:
                 ][:5] or "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        runtime_kwargs, unavailable_override = None, None
+        if override and override.get("provider"):
+            try:
+                runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(
+                    override["provider"], target_model=override.get("model") or None)
+            except Exception as exc:
+                # Layering the override on the default runtime sent its model to the default provider's
+                # endpoint (openai-codex on the Nous URL). Run this turn on the whole default route and say
+                # so; the persisted override is kept, so the next turn retries it.
+                logger.warning("Session /model override provider %s unavailable: %s", override["provider"], exc)
+                unavailable_override, override = override, None
+        if runtime_kwargs is None:
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
         # Private notice metadata must never reach an ``AIAgent(**runtime_kwargs)`` spread; the turn
         # runner surfaces it through the agent's one-shot fallback notice (#74349).
         self._pre_agent_fallback_notice = runtime_kwargs.pop("_fallback_notice", None)
@@ -229,6 +243,10 @@ class GatewayTurnMixin:
         if runtime_model:
             logger.info("Runtime provider supplied explicit model override: %s -> %s", model, runtime_model)
             model = runtime_model
+        if unavailable_override and not self._pre_agent_fallback_notice:
+            from hermes_cli.fallback_config import pre_agent_fallback_notice
+            self._pre_agent_fallback_notice = pre_agent_fallback_notice(
+                unavailable_override["provider"], unavailable_override.get("model"), runtime_kwargs.get("provider"), model)
 
         cfg = getattr(self, "config", None)  # getattr: bare object.__new__ test runners
         if cfg and source is not None:
@@ -361,7 +379,9 @@ class GatewayTurnMixin:
 
     def _event_thread_metadata(self, event, source):
         """Thread metadata for a send that replies to ``event`` on ``source``."""
-        return self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+        return delivery_metadata_for_event(
+            event, self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+        )
 
     @staticmethod
     def _pop_post_delivery_callback(adapter, key, generation):
@@ -2182,6 +2202,7 @@ class GatewayTurnMixin:
                 persist_user_display_metadata={
                     "gateway_input_owner": prepared.persistence_owner, **diagnostic_metadata(event)},
                 message_type=event.message_type,
+                delivery_metadata=delivery_metadata_for_event(event),
                 scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
@@ -2264,6 +2285,19 @@ class GatewayTurnMixin:
         if getattr(getattr(self, "config", None), "multiplex_profiles", False):
             return self._resolve_profile_home_for_source(source)
         return None
+
+    def _async_profile_scope_for_source(self, source: SessionSource):
+        """``async with`` twin of :meth:`_profile_scope_for_source` (secret hydration off-loop).
+
+        Slash dispatch runs under the RECEIVING bot's scope (auth needs its ``.env``), which is not
+        the routed runtime when a bot serves another profile's chat; every handler reading
+        home-relative state (pending writes, memory store, config) binds the runtime here (#119915)."""
+        from gateway.run import _async_profile_runtime_scope
+        home = self._profile_scope_key_for_source(source)
+        if home is not None:
+            return _async_profile_runtime_scope(home)
+        from tui_gateway.launch_profile_policy import async_launch_profile_scope_if_multiplexed
+        return async_launch_profile_scope_if_multiplexed()
 
     @staticmethod
     def _standalone_launch_scope():
@@ -2720,7 +2754,7 @@ class GatewayTurnMixin:
         self, message: str, context_prompt: str, history: List[Dict[str, Any]],
         source: "SessionSource", session_id: str, session_key: str = None,
         run_generation: Optional[int] = None, event_message_id: Optional[str] = None,
-        scheduled_heartbeat: bool = False,
+        scheduled_heartbeat: bool = False, delivery_metadata: Optional[dict] = None,
     ) -> Dict[str, Any]:
         """Forward the message to a remote Hermes API server instead of running a local AIAgent.
 
@@ -2737,16 +2771,14 @@ class GatewayTurnMixin:
             return self._proxy_error_result("⚠️ Proxy URL not configured (GATEWAY_PROXY_URL or gateway.proxy_url)")
 
         # The proxy key is a per-profile credential: honor the installed secret scope under multiplex.
-        # Only UnscopedSecretError / import failures fall back to the env; any other get_secret()
-        # error propagates (same as BASE) rather than silently degrading to the ambient key.
-        try:
-            from agent.secret_scope import UnscopedSecretError, get_secret
+        # Only UnscopedSecretError (the unscoped default-profile path) falls back to the env; any
+        # other get_secret() error propagates (same as BASE) rather than silently degrading to the
+        # ambient key, which may hold another profile's credential.
+        from agent.secret_scope import UnscopedSecretError, get_secret
 
-            try:
-                proxy_key = (get_secret("GATEWAY_PROXY_KEY") or "").strip()
-            except UnscopedSecretError:
-                proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
-        except Exception:
+        try:
+            proxy_key = (get_secret("GATEWAY_PROXY_KEY") or "").strip()
+        except UnscopedSecretError:
             proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
 
         _run_still_current = self._run_still_current_fn(session_key, run_generation)
@@ -2777,7 +2809,9 @@ class GatewayTurnMixin:
             headers["X-Hermes-Session-Id"] = session_id
         body = {"model": "hermes-agent", "messages": api_messages, "stream": True}
 
-        _thread_metadata: Optional[Dict[str, Any]] = self._thread_metadata_for_source(source, event_message_id)
+        _thread_metadata = merge_delivery_metadata(
+            delivery_metadata, self._thread_metadata_for_source(source, event_message_id)
+        )
         _stream_consumer = (
             None if scheduled_heartbeat
             else self._proxy_stream_consumer(source, event_message_id, _thread_metadata, _run_still_current)
@@ -3788,6 +3822,7 @@ class GatewayTurnMixin:
         next_source, next_message, next_session_key = source, pending, session_key
         # message_type is carried into the recursive call so queued voice turns can stream TTS.
         next_message_id = next_channel_prompt = next_message_type = None
+        next_delivery_metadata = None
         # The raw inbound id keys the delivery-ledger obligation for the follow-up's own final send,
         # distinct from the reply anchor above (None in forum topics). Carry it or two chained
         # topic turns with the same text would collide on one obligation id (queued-final-ledger).
@@ -3824,6 +3859,7 @@ class GatewayTurnMixin:
             next_inbound_id = str(pending_event.message_id) if getattr(pending_event, "message_id", None) else None
             next_channel_prompt = getattr(pending_event, "channel_prompt", None)
             next_message_type = getattr(pending_event, "message_type", None)
+            next_delivery_metadata = delivery_metadata_for_event(pending_event)
 
         # Clear the prior turn's streaming-TTS completion marker so the recursive turn isn't suppressed.
         # See #60671.
@@ -3872,6 +3908,7 @@ class GatewayTurnMixin:
                 persist_user_message=next_persist_message,
                 persist_user_display_kind=next_display_kind,
                 persist_user_display_metadata=diagnostic_metadata(pending_event) or None,
+                delivery_metadata=next_delivery_metadata,
             )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
@@ -3947,15 +3984,17 @@ class GatewayTurnMixin:
                     logger.debug("background turn task failed during cleanup", exc_info=True)
 
     async def _run_agent_edit_streamed_message(
-        self, _sc, source, response, content, *, _sk, ok, fail_result, fail_exc,
+        self, _sc, source, response, content, *, _sk, ok, fail_result, fail_exc, metadata=None,
     ) -> None:
         """Edit the stream consumer's message in place with ``content``; on success mark
         ``response["already_sent"]`` and log ``ok``. ``fail_result`` (None = trust the call) logs a
         returned failure as ``(session, error)``; ``fail_exc`` logs an exception as ``(session, exc)``."""
         try:
-            _res = await _sc.adapter.edit_message(
-                chat_id=source.chat_id, message_id=_sc.message_id, content=content, finalize=True,
-            )
+            from agent.interrupt_compat import _accepts_keyword
+            kwargs = dict(chat_id=source.chat_id, message_id=_sc.message_id, content=content, finalize=True)
+            if metadata and _accepts_keyword(_sc.adapter.edit_message, "metadata"):
+                kwargs["metadata"] = metadata
+            _res = await _sc.adapter.edit_message(**kwargs)
         except Exception as _edit_err:
             logger.warning(fail_exc, _sk, _edit_err)
             return
@@ -4022,6 +4061,7 @@ class GatewayTurnMixin:
             elif _sc_msg_id and _sc_msg_id != "__no_edit__" and getattr(_sc, "adapter", None) is not None:
                 await self._run_agent_edit_streamed_message(
                     _sc, source, response, _final, _sk=_sk,
+                    metadata=turn_ctx._status_thread_metadata,
                     ok=("Reconciled stale streamed finalize for session %s: edited message %s with the complete response (#71643).", _sk, _sc_msg_id),
                     fail_result="Stale-finalize reconciliation edit failed for session %s (%s); sending complete response via normal final send.",
                     fail_exc="Stale-finalize reconciliation edit failed for session %s: %s; sending complete response via normal final send.",
@@ -4036,6 +4076,7 @@ class GatewayTurnMixin:
             if _sc.message_id:
                 await self._run_agent_edit_streamed_message(
                     _sc, source, response, response["final_response"], _sk=_sk,
+                    metadata=turn_ctx._status_thread_metadata,
                     ok=("Edited streamed message %s for session %s to include plugin-transformed content.", _sc.message_id, _sk),
                     fail_result=None, fail_exc="Failed to edit streamed message for session %s: %s",
                 )
@@ -4099,6 +4140,10 @@ class GatewayTurnMixin:
         turn_ctx._progress_metadata, turn_ctx._progress_reply_to, _status_thread_metadata = (
             self._run_agent_progress_threading(source, event_message_id, _native_slack_task_cards)
         )
+        turn_ctx._progress_metadata = merge_delivery_metadata(
+            turn_ctx.delivery_metadata, turn_ctx._progress_metadata
+        )
+        _status_thread_metadata = merge_delivery_metadata(turn_ctx.delivery_metadata, _status_thread_metadata)
         # Bridges: sync step/event/status callbacks → async hooks.emit and adapter.send.
         turn_ctx._loop_for_step = asyncio.get_running_loop()
         turn_ctx._hooks_ref = self.hooks
@@ -4194,7 +4239,7 @@ class GatewayTurnMixin:
         persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
         persist_user_display_metadata: Optional[dict] = None,
-        scheduled_heartbeat: bool = False,
+        scheduled_heartbeat: bool = False, delivery_metadata: Optional[dict] = None,
     ) -> Dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
 
@@ -4204,6 +4249,7 @@ class GatewayTurnMixin:
                 message=message, context_prompt=context_prompt, history=history, source=source,
                 session_id=session_id, session_key=session_key, run_generation=run_generation,
                 event_message_id=event_message_id, scheduled_heartbeat=scheduled_heartbeat,
+                delivery_metadata=delivery_metadata,
             )
 
         from run_agent import AIAgent
@@ -4226,6 +4272,7 @@ class GatewayTurnMixin:
             run_generation=run_generation, context_prompt=context_prompt, history=history,
             session_id=session_id, _interrupt_depth=_interrupt_depth,
             event_message_id=event_message_id, inbound_message_id=inbound_message_id,
+            delivery_metadata=merge_delivery_metadata(delivery_metadata),
             channel_prompt=channel_prompt, moa_config=moa_config,
             persist_user_message=persist_user_message,
             persist_user_timestamp=persist_user_timestamp,

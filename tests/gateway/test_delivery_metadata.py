@@ -31,7 +31,7 @@ async def test_turn_stream_and_final_edit_keep_event_targets_and_core_route(fina
         edit_message=AsyncMock(return_value=SendResult(success=True, message_id="sent")),
     )
     runner = object.__new__(GatewayRunner)
-    runner._adapter_for_source = lambda source: adapter
+    runner._delivery_adapter_for = lambda source: adapter
     runner.hooks = SimpleNamespace()
     runner.config = SimpleNamespace(streaming=StreamingConfig(enabled=True, transport="edit"))
     ctx = TurnContext(

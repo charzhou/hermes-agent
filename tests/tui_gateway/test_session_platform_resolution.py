@@ -82,4 +82,3 @@ class TestSessionSourceFallback:
         clean_env.setenv("HERMES_DESKTOP", "1")
         _srv = _reload_resolver()
         assert _srv._session_source({"source": "telegram"}) == "telegram"
-

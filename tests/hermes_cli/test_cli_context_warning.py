@@ -60,16 +60,6 @@ class TestLowContextWarning:
         assert minimum_calls
 
 
-    def test_warning_for_2048_context(self, cli_obj):
-        """Warning shown for 2048 tokens (common LM Studio default)."""
-        cli_obj.agent.context_compressor.context_length = 2048
-        with patch("cli.get_tool_definitions", return_value=[]), \
-             patch("hermes_cli.banner.build_welcome_banner"):
-            cli_obj.show_banner()
-
-        calls = [str(c) for c in cli_obj.console.print.call_args_list]
-        warning_calls = [c for c in calls if "too low" in c]
-        assert len(warning_calls) == 1
 
     def test_no_warning_at_boundary(self, cli_obj):
         """No warning at exactly Hermes' minimum context length."""
@@ -86,7 +76,7 @@ class TestLowContextWarning:
         cli_obj.agent.context_compressor.context_length = 32_000
         cli_obj.agent.minimum_context_length = 32_000
         with patch("cli.get_tool_definitions", return_value=[]), \
-             patch("cli.build_welcome_banner"):
+             patch("hermes_cli.banner.build_welcome_banner"):
             cli_obj.show_banner()
 
         calls = [str(c) for c in cli_obj.console.print.call_args_list]
@@ -128,6 +118,18 @@ class TestLowContextWarning:
         calls = [str(c) for c in cli_obj.console.print.call_args_list]
         generic_hints = [c for c in calls if "config.yaml" in c]
         assert len(generic_hints) == 1
+
+    def test_compact_banner_does_not_crash_on_narrow_terminal(self, cli_obj):
+        """Compact mode should still have ctx_len defined for warning logic."""
+        cli_obj.agent.context_compressor.context_length = 4096
+
+        with patch("shutil.get_terminal_size", return_value=os.terminal_size((70, 40))), \
+             patch("cli._build_compact_banner", return_value="compact banner"):
+            cli_obj.show_banner()
+
+        calls = [str(c) for c in cli_obj.console.print.call_args_list]
+        warning_calls = [c for c in calls if "too low" in c]
+        assert len(warning_calls) == 1
 
 
     def test_compact_banner_does_not_crash_on_narrow_terminal(self, cli_obj):
