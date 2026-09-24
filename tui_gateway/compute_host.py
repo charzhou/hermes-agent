@@ -3,6 +3,12 @@
 
 from __future__ import annotations
 
+# First, like every entry point: stdio, import-path and environ-lifetime fixes (hermes_bootstrap).
+# Only as ``python -m``: tests import this module, and the bootstrap's TMPDIR/scratch exports
+# must not fire in a library importer.
+if __name__ == "__main__":
+    import hermes_bootstrap  # noqa: F401
+
 import argparse
 import concurrent.futures
 import contextlib
@@ -462,7 +468,7 @@ class ComputeHost:
         else:
             output = server._mirror_slash_side_effects(sid, session, command) if command else ""
             with session["history_lock"]:
-                messages = server._history_to_messages(list(session.get("history") or []))
+                messages = server._history_to_messages(list(session.get("history") or []), profile_home=session.get("profile_home"))
                 ack = {"output": output, **_history_meta(session), "messages": messages}
         ack["session_info"] = server._session_info(session.get("agent"), session)
         return ack
@@ -519,6 +525,11 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
     stdin = stdin or sys.stdin
     host = ComputeHost(stdout=stdout or sys.stdout)
     shutting_down = threading.Event()
+    # No client is connected to this process: session-less broadcasts (``broadcast_plugin_event``
+    # from a plugin tool/hook running in the isolated turn) ride the host pipe to the parent
+    # gateway, which fans them out to its clients (compute_host_bridge._relay_compute_host_rpc).
+    from tui_gateway import server
+    server.register_live_transport(host._transport)
 
     def _signal_handler(_signum, _frame) -> None:
         if shutting_down.is_set():
@@ -558,6 +569,7 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
             if not reader.is_alive():
                 break
     finally:
+        server.unregister_live_transport(host._transport)
         host.shutdown(reason="stdin_closed", wait=2.0)
 
 
