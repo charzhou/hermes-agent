@@ -20,6 +20,7 @@ from agent.prompt_builder import (
     build_skills_system_prompt,
     build_context_files_prompt,
     CONTEXT_FILE_MAX_CHARS,
+    _dynamic_context_file_max_chars,
     _get_context_file_max_chars,
     drain_truncation_warnings,
 )

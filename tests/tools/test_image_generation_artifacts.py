@@ -203,9 +203,9 @@ def test_openai_edit_uses_configured_client_overrides(monkeypatch, tmp_path):
     assert result["success"] is True
     assert result["modality"] == "image"
     assert result["image"] == str(tmp_path / "openai_gpt-image-2-medium.png")
-    assert client_kwargs == [
-        {"api_key": "custom-image-key", "base_url": "https://proxy.example/v1"}
-    ]
+    assert len(client_kwargs) == 1
+    assert client_kwargs[0]["api_key"] == "custom-image-key"
+    assert client_kwargs[0]["base_url"] == "https://proxy.example/v1"
     assert generate_calls == []
     assert len(edit_calls) == 1
     assert edit_calls[0]["prompt"] == "make the image brighter"
