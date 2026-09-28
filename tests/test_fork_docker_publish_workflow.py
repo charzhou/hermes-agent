@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-import yaml
+import hermes_yaml as yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

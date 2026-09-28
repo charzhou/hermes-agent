@@ -30,7 +30,7 @@ class TestResolveActiveContextLengthProviderAware:
     @pytest.mark.parametrize("context_length, uses_bridge", [(32_000, True), (64_000, False)])
     def test_32k_policy_reaches_model_visible_tools(self, tmp_path, monkeypatch, context_length, uses_bridge):
         import model_tools
-        import yaml
+        import hermes_yaml as yaml
         from tools.registry import registry
 
         config_path = tmp_path / "config.yaml"
