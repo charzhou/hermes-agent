@@ -153,6 +153,15 @@ def test_build_is_credential_free_and_runs_full_docker_gate() -> None:
     assert not any(item.startswith("docker/login-action@") for item in uses)
     assert build.get("permissions", {"contents": "read"}) == {"contents": "read"}
 
+    stamp = _step_named(build, "Write install stamp")
+    stamp_script = stamp["run"]
+    assert "scripts/write_install_stamp.py" in stamp_script
+    assert "--output install-stamp.json" in stamp_script
+    assert '--commit "$GITHUB_SHA"' in stamp_script
+    assert "--source ci" in stamp_script
+    assert "--distribution docker" in stamp_script
+    assert "--update-mechanism external" in stamp_script
+
     image = _step_using(build, "docker/build-push-action@")
     config = image["with"]
     assert config["load"] is True
@@ -190,6 +199,15 @@ def test_publish_is_credentialed_digest_only_and_test_free() -> None:
     publish = _workflow()["jobs"]["publish"]
     _assert_official_matrix(publish)
     _assert_buildx_retry(publish)
+
+    stamp = _step_named(publish, "Write install stamp")
+    stamp_script = stamp["run"]
+    assert "scripts/write_install_stamp.py" in stamp_script
+    assert "--output install-stamp.json" in stamp_script
+    assert '--commit "$GITHUB_SHA"' in stamp_script
+    assert "--source ci" in stamp_script
+    assert "--distribution docker" in stamp_script
+    assert "--update-mechanism external" in stamp_script
 
     login = _step_using(publish, "docker/login-action@")
     assert login["with"] == {

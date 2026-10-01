@@ -62,6 +62,21 @@ def test_readonly_source_with_baked_fresh_deps_runs_in_place(
     assert sidecar_paths.resolve_sidecar_dir(source) == source
 
 
+def test_readonly_source_with_baked_deps_at_same_timestamp_runs_in_place(
+    tmp_path, monkeypatch
+) -> None:
+    """The image build may align both mtimes after copying the source tree."""
+    monkeypatch.delenv("PHOTON_SIDECAR_DIR", raising=False)
+    source = tmp_path / "src"
+    _seed_source(source, with_node_modules=True)
+    lock = source / "package-lock.json"
+    marker = source / "node_modules" / ".package-lock.json"
+    os.utime(lock, (2000.0, 2000.0))
+    os.utime(marker, (2000.0, 2000.0))
+    _freeze_writability(monkeypatch, writable=False)
+    assert sidecar_paths.resolve_sidecar_dir(source) == source
+
+
 def test_mirror_refresh_updates_changed_files_and_keeps_node_modules(
     tmp_path, monkeypatch
 ) -> None:

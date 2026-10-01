@@ -351,6 +351,12 @@ RUN mkdir -p /tmp/hermes-runtime && chmod 0700 /tmp/hermes-runtime
 # write so the build steps below don't need chmod u+w dances.
 COPY --link --chmod=a+rX,go-w . .
 
+# The source copy refreshes package-lock.json after npm ci. Keep the baked
+# npm install marker at the same timestamp so the immutable-image resolver
+# recognizes the dependencies as current instead of mirroring them at runtime.
+RUN touch -r plugins/platforms/photon/sidecar/package-lock.json \
+    plugins/platforms/photon/sidecar/node_modules/.package-lock.json
+
 # The shared assembler binds the prepared environment and frontend products.
 RUN /opt/hermes/.venv/bin/python -m docker.build_agent
 

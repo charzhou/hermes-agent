@@ -47,6 +47,15 @@ jobs:
           image_name="$(printf '%s' "${RAW_IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
           echo "image_name=${image_name}" >> "${GITHUB_OUTPUT}"
 
+      - name: Write install stamp
+        run: |
+          python3 scripts/write_install_stamp.py \
+            --output install-stamp.json \
+            --commit "$GITHUB_SHA" \
+            --source ci \
+            --distribution docker \
+            --update-mechanism external
+
       - name: Set up Docker Buildx
         id: buildx
         continue-on-error: true
@@ -121,6 +130,15 @@ jobs:
     steps:
       - name: Checkout trusted source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Write install stamp
+        run: |
+          python3 scripts/write_install_stamp.py \
+            --output install-stamp.json \
+            --commit "$GITHUB_SHA" \
+            --source ci \
+            --distribution docker \
+            --update-mechanism external
 
       - name: Normalize image name
         id: image
