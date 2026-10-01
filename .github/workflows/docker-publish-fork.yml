@@ -78,20 +78,12 @@ jobs:
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ matrix.cache-to }}
 
-      - name: Install uv (for docker tests)
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
         with:
-          version: "0.12.13"
-
-      - name: Set up Python 3.14 (for docker tests)
-        uses: ./.github/actions/retry
-        with:
-          command: uv python install 3.14
-
-      - name: Install Python dependencies (for docker tests)
-        uses: ./.github/actions/retry
-        with:
-          command: uv sync --locked --python 3.14 --group dev
+          extras: '[]'
+          test-environment: 'true'
+          prune-python-cache: true
 
       - name: Run docker integration tests
         env:

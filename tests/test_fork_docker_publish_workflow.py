@@ -173,16 +173,11 @@ def test_build_is_credential_free_and_runs_full_docker_gate() -> None:
     assert config.get("push") is not True
     assert "push-by-digest=true" not in str(config)
 
-    setup_uv = _step_using(build, "astral-sh/setup-uv@")
-    assert setup_uv["with"]["version"] == "0.12.13"
-    retry_commands = {
-        step["with"]["command"]
-        for step in _steps(build)
-        if step.get("uses") == "./.github/actions/retry"
-    }
-    assert retry_commands == {
-        "uv python install 3.14",
-        "uv sync --locked --python 3.14 --group dev",
+    setup_pm = _step_using(build, "./.github/actions/setup-pm")
+    assert setup_pm["with"] == {
+        "extras": "[]",
+        "test-environment": "true",
+        "prune-python-cache": True,
     }
 
     test_step = _step_named(build, "Run docker integration tests")
