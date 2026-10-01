@@ -78,12 +78,18 @@ jobs:
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ matrix.cache-to }}
 
+      - name: Park the image install stamp while provisioning the runner toolchain
+        run: mv install-stamp.json "$RUNNER_TEMP/install-stamp.json"
+
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
           extras: '[]'
           test-environment: 'true'
           prune-python-cache: true
+
+      - name: Restore the image install stamp for the docker tests
+        run: mv "$RUNNER_TEMP/install-stamp.json" install-stamp.json
 
       - name: Run docker integration tests
         env:

@@ -173,12 +173,18 @@ def test_build_is_credential_free_and_runs_full_docker_gate() -> None:
     assert config.get("push") is not True
     assert "push-by-digest=true" not in str(config)
 
+    park = _step_named(build, "Park the image install stamp while provisioning the runner toolchain")
+    assert park["run"] == 'mv install-stamp.json "$RUNNER_TEMP/install-stamp.json"'
+
     setup_pm = _step_using(build, "./.github/actions/setup-pm")
     assert setup_pm["with"] == {
         "extras": "[]",
         "test-environment": "true",
         "prune-python-cache": True,
     }
+
+    restore = _step_named(build, "Restore the image install stamp for the docker tests")
+    assert restore["run"] == 'mv "$RUNNER_TEMP/install-stamp.json" install-stamp.json'
 
     test_step = _step_named(build, "Run docker integration tests")
     assert "scripts/run_tests.sh tests/docker/ --file-timeout 600" in test_step["run"]
