@@ -82,7 +82,7 @@ jobs:
       - name: Install Python dependencies (for docker tests)
         uses: ./.github/actions/retry
         with:
-          command: uv sync --locked --python 3.11 --extra dev
+          command: uv sync --locked --python 3.11 --group dev
 
       - name: Run docker integration tests
         env:

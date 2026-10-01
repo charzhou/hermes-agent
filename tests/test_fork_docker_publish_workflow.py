@@ -173,7 +173,7 @@ def test_build_is_credential_free_and_runs_full_docker_gate() -> None:
     }
     assert retry_commands == {
         "uv python install 3.11",
-        "uv sync --locked --python 3.11 --extra dev",
+        "uv sync --locked --python 3.11 --group dev",
     }
 
     test_step = _step_named(build, "Run docker integration tests")
