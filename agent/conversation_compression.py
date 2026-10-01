@@ -2093,7 +2093,8 @@ def check_compression_model_feasibility(agent: Any) -> None:
             _resolve_task_provider_model, _try_configured_fallback_for_unavailable_client,
             get_text_auxiliary_client,
         )
-        from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length, resolve_minimum_context_length
+        from agent.model_metadata import get_model_context_length
+        from agent.context_policy import resolve_minimum_context_length
         minimum_context_length = resolve_minimum_context_length(getattr(agent, "minimum_context_length", None))
         # Provider may be "auto"; fall back to the client's base_url hostname so the
         # user can tell where the compression model is actually called.
@@ -2192,15 +2193,19 @@ def revalidate_compression_feasibility(agent: Any) -> None:
 
 
 def ensure_compression_feasibility_checked(agent: Any, estimated_tokens: int) -> None:
-    """Run the deferred aux feasibility probe once a request first reaches ``MINIMUM_CONTEXT_LENGTH`` — the
-    smallest window any summariser may have — so an aux clamp lands before the first compaction fires on the
-    main-window threshold instead of after it (#114707). Below that size no summariser can be too small, so
-    short sessions keep the probe-free cold start (#28957). A probe failure leaves the latch unset for the
-    lazy probe in ``compress_context`` to re-raise hard rejections."""
+    """Run the deferred aux feasibility probe once a request reaches the active context floor.
+
+    This keeps the probe before the first compaction on both the default and the
+    explicitly supported small-context policy. Below that floor no summariser can
+    be too small, so short sessions keep the probe-free cold start (#28957).
+    A probe failure leaves the latch unset for the lazy probe in ``compress_context``
+    to re-raise hard rejections.
+    """
     if getattr(agent, "_compression_feasibility_checked", False) or not getattr(agent, "context_compressor", None):
         return
-    from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
-    if int(estimated_tokens or 0) < MINIMUM_CONTEXT_LENGTH:
+    from agent.context_policy import resolve_minimum_context_length
+    minimum_context_length = resolve_minimum_context_length(getattr(agent, "minimum_context_length", None))
+    if int(estimated_tokens or 0) < minimum_context_length:
         return
     try:
         check_compression_model_feasibility(agent)

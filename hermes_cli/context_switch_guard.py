@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, List, Optional
 
-from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
+from agent.context_policy import resolve_minimum_context_length
 from hermes_cli.model_switch import ModelSwitchResult, resolve_display_context_length
 
 
@@ -21,7 +21,10 @@ def _threshold_tokens(compressor: Any, model: str, context_length: int, provider
     preview = getattr(compressor, "preview_threshold_tokens", None)
     if callable(preview):
         return int(preview(model, context_length, provider))
-    return max(int(context_length * float(getattr(compressor, "threshold_percent", 0.5))), MINIMUM_CONTEXT_LENGTH)
+    minimum_context_length = resolve_minimum_context_length(
+        getattr(compressor, "minimum_context_length", None)
+    )
+    return max(int(context_length * float(getattr(compressor, "threshold_percent", 0.5))), minimum_context_length)
 
 
 def _estimate_tokens(agent: Any, messages: Optional[List[dict]]) -> Optional[int]:

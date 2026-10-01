@@ -179,7 +179,8 @@ class CLIInfoMixin:
                 self._show_tool_availability_warnings()
 
         # Low context warning — tied to the runtime guard so guidance cannot drift.
-        from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, is_local_endpoint, resolve_minimum_context_length
+        from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, is_local_endpoint
+        from agent.context_policy import resolve_minimum_context_length
         minimum_context = resolve_minimum_context_length(getattr(self.agent, "minimum_context_length", None))
         if ctx_len and ctx_len < minimum_context:
             self._console_print()
@@ -197,7 +198,7 @@ class CLIInfoMixin:
                 fix = t("cli.banner.fix_lm_studio")
             elif is_local_endpoint(base_url):  # llama.cpp / vLLM / any local server — not Ollama
                 fix = t("cli.banner.fix_local_server",
-                        tokens_k=str(MINIMUM_CONTEXT_LENGTH // 1000), tokens=str(MINIMUM_CONTEXT_LENGTH))
+                        tokens_k=str(minimum_context // 1000), tokens=str(minimum_context))
             else:
                 fix = t("cli.banner.fix_config")
             self._console_print(f"[dim]   {fix}[/]")

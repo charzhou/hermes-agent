@@ -425,7 +425,7 @@ def _pressure_with_real_floor(compressor: Any, rough_tokens: int) -> int:
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
-    from agent.model_metadata import resolve_minimum_context_length
+    from agent.context_policy import resolve_minimum_context_length
     minimum_context = resolve_minimum_context_length(getattr(agent, "minimum_context_length", None))
     runtime_ctx = getattr(agent, "_ollama_num_ctx", None)
     if (

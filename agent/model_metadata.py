@@ -270,14 +270,6 @@ def _warn_context_length_fallback(model: str, base_url: str) -> None:
 
 # Sessions, model switches and cron jobs reject models below this (too little working memory).
 MINIMUM_CONTEXT_LENGTH = 64_000
-SMALL_CONTEXT_MINIMUM_LENGTH = 32_000
-
-
-def resolve_minimum_context_length(raw: object) -> int:
-    """Resolve the configured context floor, preserving the 64K default."""
-    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= SMALL_CONTEXT_MINIMUM_LENGTH:
-        return raw
-    return MINIMUM_CONTEXT_LENGTH
 
 # In-process (model, base_url) -> (result, monotonic_ts) memo for local probes: one
 # startup resolves the same model several times (banner, /model, compressor). Never persisted.

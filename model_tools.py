@@ -562,14 +562,16 @@ def _active_model_config() -> Tuple[str, Dict[str, Any]]:
 
 def _uses_small_context_tool_mode(context_length: int) -> bool:
     """Keep the opt-in 32K runtime within its smaller tool-schema budget."""
-    from agent.model_metadata import (
-        MINIMUM_CONTEXT_LENGTH, SMALL_CONTEXT_MINIMUM_LENGTH, resolve_minimum_context_length,
-    )
+    from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
+    from agent.context_policy import is_small_context_mode, resolve_minimum_context_length
     if not isinstance(context_length, int) or not 0 < context_length < MINIMUM_CONTEXT_LENGTH:
         return False
     try:
         _, model_cfg = _active_model_config()
-        return resolve_minimum_context_length(model_cfg.get("minimum_context_length")) == SMALL_CONTEXT_MINIMUM_LENGTH
+        return is_small_context_mode(
+            context_length,
+            resolve_minimum_context_length(model_cfg.get("minimum_context_length")),
+        )
     except Exception as exc:
         logger.debug("Could not resolve small-context tool mode: %s", exc)
         return False

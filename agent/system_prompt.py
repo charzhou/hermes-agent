@@ -542,8 +542,8 @@ def _memory_parts(agent: Any) -> List[str]:
 
 
 def _small_context_kwargs(agent: Any, ctx_len: Optional[int]) -> dict:
-    from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, SMALL_CONTEXT_MINIMUM_LENGTH
-    if ctx_len and ctx_len < MINIMUM_CONTEXT_LENGTH and getattr(agent, "minimum_context_length", None) == SMALL_CONTEXT_MINIMUM_LENGTH:
+    from agent.context_policy import is_small_context_mode
+    if is_small_context_mode(ctx_len, getattr(agent, "minimum_context_length", None)):
         return {"allow_below_default": True}
     return {}
 
