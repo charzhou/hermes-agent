@@ -414,6 +414,13 @@ RUN mkdir -p /opt/hermes/bin && \
 # checkout) and /opt/data (the mutable HERMES_HOME volume).  Its `revision`
 # is read from the install stamp; the fallback stamp's all-zero commit maps
 # to null.
+# These args are intentionally declared in the runtime stage so the marker
+# records the actual fork image and its dependency policy. The fork workflow
+# passes HERMES_FORK_ALL_EXTRAS=1 after sealing every Linux-compatible extra;
+# the stage2 hook uses the marker to avoid replacing that sealed environment
+# with a writable PM generation on the data volume.
+ARG HERMES_FORK_ALL_EXTRAS
+ARG HERMES_IMAGE_NAME=hermes-agent
 RUN set -eu; \
     if [ ! -f /opt/hermes/install-stamp.json ]; then \
         printf '{"schemaVersion":2,"commit":"0000000000000000000000000000000000000000","distribution":"docker","source":"fallback","updateMechanism":"external"}\n' \
@@ -421,7 +428,8 @@ RUN set -eu; \
     fi; \
     python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n")'; \
     mkdir -p /etc/hermes; \
-    python3 -c 'import json, pathlib, tomllib; project = tomllib.loads(pathlib.Path("/opt/hermes/pyproject.toml").read_text(encoding="utf-8"))["project"]; stamp = json.loads(pathlib.Path("/opt/hermes/install-stamp.json").read_text(encoding="utf-8")); commit = stamp.get("commit"); revision = commit if commit and set(commit) != {"0"} else None; marker = pathlib.Path("/etc/hermes/image-provenance.json"); marker.write_text(json.dumps({"schema": 1, "deployment_kind": "image", "manager": "docker", "image": "nousresearch/hermes-agent", "version": project["version"], "revision": revision}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"); marker.chmod(0o444)'
+    HERMES_FORK_ALL_EXTRAS="${HERMES_FORK_ALL_EXTRAS:-}" HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME}" \
+    python3 -c 'import json, os, pathlib, tomllib; project = tomllib.loads(pathlib.Path("/opt/hermes/pyproject.toml").read_text(encoding="utf-8"))["project"]; stamp = json.loads(pathlib.Path("/opt/hermes/install-stamp.json").read_text(encoding="utf-8")); commit = stamp.get("commit"); revision = commit if commit and set(commit) != {"0"} else None; marker = pathlib.Path("/etc/hermes/image-provenance.json"); marker.write_text(json.dumps({"schema": 1, "deployment_kind": "image", "manager": "docker", "image": os.environ["HERMES_IMAGE_NAME"], "dependency_policy": "sealed" if os.environ.get("HERMES_FORK_ALL_EXTRAS") == "1" else "refresh", "version": project["version"], "revision": revision}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"); marker.chmod(0o444)'
 
 # ---------- s6-overlay service wiring ----------
 # Static services declared at build time: main-hermes + dashboard.
@@ -467,13 +475,11 @@ ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
 ENV HERMES_HOME=/opt/data
 ENV HERMES_WRITE_SAFE_ROOT=/opt/data
-ARG HERMES_FORK_ALL_EXTRAS
 ENV HERMES_DISABLE_LAZY_INSTALLS=${HERMES_FORK_ALL_EXTRAS}
-# Opt-in backend SDKs install on first use into PM dependency generations under
-# /opt/data/installs (the sealed /opt/hermes/.venv is never written); stage2
-# re-resolves them against each new image. security.allow_lazy_installs: false
-# turns this off. Fork full-extra images set the environment above so gateway
-# startup never blocks on a PM sync.
+# Fork full-extra images set this to 1. Their provenance marker also tells
+# stage2 to keep the sealed /opt/hermes/.venv authoritative and skip PM
+# generation refreshes. Official images leave this unset and retain their
+# existing opt-in lazy-extra behavior.
 
 # Xfce, dbus and the display-allocation lock need one; containers have no logind
 # to create /run/user/<uid>. The default fallback ($HOME/.cache) is the /opt/data

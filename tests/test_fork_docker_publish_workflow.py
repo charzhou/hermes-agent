@@ -1,4 +1,4 @@
-"""Structural contract for the fork-only GHCR publishing workflow."""
+"""Structural contracts for the fork-only GHCR publishing workflow."""
 
 from __future__ import annotations
 
@@ -54,9 +54,8 @@ def _matrix_rows(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {row["arch"]: row for row in rows}
 
 
-def _assert_official_matrix(job: dict[str, Any]) -> None:
-    rows = _matrix_rows(job)
-    assert rows == {
+def _assert_build_matrix(job: dict[str, Any]) -> None:
+    assert _matrix_rows(job) == {
         "amd64": {
             "arch": "amd64",
             "runner": "ubuntu-latest",
@@ -71,6 +70,14 @@ def _assert_official_matrix(job: dict[str, Any]) -> None:
             "cache-from": "type=gha,scope=fork-docker-arm64",
             "cache-to": "type=gha,mode=max,scope=fork-docker-arm64",
         },
+    }
+    assert job["runs-on"] == "${{ matrix.runner }}"
+
+
+def _assert_publish_matrix(job: dict[str, Any]) -> None:
+    assert _matrix_rows(job) == {
+        "amd64": {"arch": "amd64", "runner": "ubuntu-latest"},
+        "arm64": {"arch": "arm64", "runner": "ubuntu-24.04-arm"},
     }
     assert job["runs-on"] == "${{ matrix.runner }}"
 
@@ -101,7 +108,7 @@ def test_trigger_permissions_concurrency_and_fork_gates() -> None:
     workflow = _workflow()
     triggers = _triggers(workflow)
     assert set(triggers) == {"push", "workflow_dispatch"}
-    assert triggers["push"] == {"branches": ["main"]}
+    assert triggers["push"] == {"branches": ["prod"]}
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {
         "group": "docker-publish-fork-${{ github.ref }}",
@@ -113,9 +120,12 @@ def test_trigger_permissions_concurrency_and_fork_gates() -> None:
     assert set(jobs) == {"build", "publish", "merge"}
     for job in jobs.values():
         assert "github.repository != 'NousResearch/hermes-agent'" in job["if"]
+        assert "refs/heads/prod" in job["if"]
+        assert "refs/heads/main" not in job["if"]
 
     assert jobs["publish"]["needs"] == ["build"]
     assert jobs["merge"]["needs"] == ["publish"]
+    assert jobs["build"]["permissions"] == {"contents": "read"}
     for name in ("publish", "merge"):
         assert jobs[name]["permissions"] == {
             "contents": "read",
@@ -124,10 +134,6 @@ def test_trigger_permissions_concurrency_and_fork_gates() -> None:
         condition = jobs[name]["if"]
         assert "github.event_name == 'workflow_dispatch'" in condition
         assert "github.event_name == 'push'" in condition
-        assert "github.ref == 'refs/heads/main'" in condition
-    assert jobs["build"].get("permissions", {"contents": "read"}) == {
-        "contents": "read"
-    }
 
 
 def test_image_name_is_fork_configurable_and_normalized_in_every_job() -> None:
@@ -144,14 +150,15 @@ def test_image_name_is_fork_configurable_and_normalized_in_every_job() -> None:
     assert "name=${{ env.IMAGE_NAME }}" not in content
 
 
-def test_build_is_credential_free_and_runs_full_docker_gate() -> None:
+def test_build_is_credential_free_and_saves_the_tested_image() -> None:
     build = _workflow()["jobs"]["build"]
-    _assert_official_matrix(build)
+    _assert_build_matrix(build)
     _assert_buildx_retry(build)
+    assert build["permissions"] == {"contents": "read"}
 
     uses = [str(step.get("uses", "")) for step in _steps(build)]
     assert not any(item.startswith("docker/login-action@") for item in uses)
-    assert build.get("permissions", {"contents": "read"}) == {"contents": "read"}
+    assert not any(item.startswith("actions/download-artifact@") for item in uses)
 
     stamp = _step_named(build, "Write install stamp")
     stamp_script = stamp["run"]
@@ -168,24 +175,14 @@ def test_build_is_credential_free_and_runs_full_docker_gate() -> None:
     assert config["platforms"] == "${{ matrix.platform }}"
     assert config["tags"] == "${{ steps.image.outputs.image_name }}:test"
     assert "HERMES_GIT_SHA=${{ github.sha }}" in config["build-args"]
+    assert "HERMES_IMAGE_NAME=${{ steps.image.outputs.image_name }}" in config["build-args"]
     assert "HERMES_FORK_ALL_EXTRAS=1" in config["build-args"]
+    assert "org.opencontainers.image.revision=${{ github.sha }}" in config["labels"]
+    assert "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" in config["labels"]
     assert config["cache-from"] == "${{ matrix.cache-from }}"
     assert config["cache-to"] == "${{ matrix.cache-to }}"
     assert config.get("push") is not True
     assert "push-by-digest=true" not in str(config)
-
-    park = _step_named(build, "Park the image install stamp while provisioning the runner toolchain")
-    assert park["run"] == 'mv install-stamp.json "$RUNNER_TEMP/install-stamp.json"'
-
-    setup_pm = _step_using(build, "./.github/actions/setup-pm")
-    assert setup_pm["with"] == {
-        "extras": "[]",
-        "test-environment": "true",
-        "prune-python-cache": True,
-    }
-
-    restore = _step_named(build, "Restore the image install stamp for the docker tests")
-    assert restore["run"] == 'mv "$RUNNER_TEMP/install-stamp.json" install-stamp.json'
 
     test_step = _step_named(build, "Run docker integration tests")
     assert "scripts/run_tests.sh tests/docker/ --file-timeout 600" in test_step["run"]
@@ -196,20 +193,36 @@ def test_build_is_credential_free_and_runs_full_docker_gate() -> None:
         "NOUS_API_KEY": "",
     }
 
+    save = _step_named(build, "Save tested image archive")
+    assert "docker image inspect" in save["run"]
+    assert "Architecture" in save["run"]
+    assert "docker save" in save["run"]
+    assert "sha256sum" in save["run"]
+    upload = _step_named(build, "Upload tested image archive")
+    assert upload["with"]["name"] == "docker-test-image-${{ matrix.arch }}"
+    assert upload["with"]["compression-level"] == 0
 
-def test_publish_is_credentialed_digest_only_and_test_free() -> None:
+
+def test_publish_loads_tested_archives_without_rebuilding() -> None:
     publish = _workflow()["jobs"]["publish"]
-    _assert_official_matrix(publish)
+    _assert_publish_matrix(publish)
     _assert_buildx_retry(publish)
+    assert publish["needs"] == ["build"]
+    assert not any(
+        str(step.get("uses", "")).startswith("docker/build-push-action@")
+        for step in _steps(publish)
+    )
 
-    stamp = _step_named(publish, "Write install stamp")
-    stamp_script = stamp["run"]
-    assert "scripts/write_install_stamp.py" in stamp_script
-    assert "--output install-stamp.json" in stamp_script
-    assert '--commit "$GITHUB_SHA"' in stamp_script
-    assert "--source ci" in stamp_script
-    assert "--distribution docker" in stamp_script
-    assert "--update-mechanism external" in stamp_script
+    download = _step_using(publish, "actions/download-artifact@")
+    assert download["with"] == {
+        "name": "docker-test-image-${{ matrix.arch }}",
+        "path": "/tmp/image-artifacts",
+    }
+    verify = _step_named(publish, "Verify tested image archive")
+    assert "sha256sum --check" in verify["run"]
+    load = _step_named(publish, "Load and verify tested image")
+    assert "docker load" in load["run"]
+    assert "Loaded Docker image differs from tested image" in load["run"]
 
     login = _step_using(publish, "docker/login-action@")
     assert login["with"] == {
@@ -217,39 +230,24 @@ def test_publish_is_credentialed_digest_only_and_test_free() -> None:
         "username": "${{ github.actor }}",
         "password": "${{ secrets.GITHUB_TOKEN }}",
     }
+    push = _step_named(publish, "Push tested image with temporary architecture tag")
+    assert "docker tag" in push["run"]
+    assert "docker push" in push["run"]
+    digest = _step_named(publish, "Record pushed architecture digest")
+    assert "docker buildx imagetools inspect" in digest["run"]
+    assert "Manifest.Digest" in digest["run"]
+    upload = _step_named(publish, "Upload tested image digest")
+    assert upload["with"]["name"] == "digest-${{ matrix.arch }}"
 
-    push = _step_using(publish, "docker/build-push-action@")
-    config = push["with"]
-    assert config["platforms"] == "${{ matrix.platform }}"
-    assert config["outputs"] == (
-        "type=image,name=${{ steps.image.outputs.image_name }},"
-        "push-by-digest=true,name-canonical=true,push=true"
-    )
-    assert "HERMES_FORK_ALL_EXTRAS=1" in config["build-args"]
-    assert "tags" not in config
-    assert "org.opencontainers.image.revision=${{ github.sha }}" in config["labels"]
-    assert (
-        "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
-        in config["labels"]
-    )
-    assert config["cache-from"] == "${{ matrix.cache-from }}"
-    assert config["cache-to"] == "${{ matrix.cache-to }}"
-
-    upload = _step_using(publish, "actions/upload-artifact@")
-    assert upload["with"] == {
-        "name": "digest-${{ matrix.arch }}",
-        "path": "/tmp/digests/*",
-        "if-no-files-found": "error",
-        "retention-days": 1,
-    }
-    publish_text = yaml.safe_dump(publish)
-    assert "scripts/run_tests.sh" not in publish_text
-    assert "docker run" not in publish_text
+    names = [step.get("name") for step in _steps(publish)]
+    assert names.index("Load and verify tested image") < names.index("Log in to ghcr.io")
+    assert "scripts/run_tests.sh" not in yaml.safe_dump(publish)
 
 
 def test_merge_requires_two_digests_and_gates_mutable_tags() -> None:
     merge = _workflow()["jobs"]["merge"]
     _assert_buildx_retry(merge)
+    assert merge["needs"] == ["publish"]
     login = _step_using(merge, "docker/login-action@")
     assert login["with"]["registry"] == "ghcr.io"
     assert login["with"]["username"] == "${{ github.actor }}"
@@ -267,18 +265,18 @@ def test_merge_requires_two_digests_and_gates_mutable_tags() -> None:
     assert manifest["env"]["IMAGE_NAME"] == "${{ steps.image.outputs.image_name }}"
     script = manifest["run"]
     assert "set -euo pipefail" in script
+    assert "shopt -s nullglob" in script
+    assert "digest_files=(*)" in script
     assert 'if [ "${#digest_files[@]}" -ne 2 ]' in script
-    assert '"${IMAGE_NAME}@sha256:${digest_file}"' in script
+    assert '"${IMAGE_NAME}@sha256:${digest}"' in script
     assert 'tags=(-t "${IMAGE_NAME}:sha-${GITHUB_SHA}")' in script
-    assert '"${GITHUB_EVENT_NAME}" = "push"' in script
-    assert '"${GITHUB_REF}" = "refs/heads/main"' in script
-    assert 'tags+=(-t "${IMAGE_NAME}:main" -t "${IMAGE_NAME}:latest")' in script
+    assert '"${GITHUB_REF}" = "refs/heads/prod"' in script
+    assert 'tags+=(-t "${IMAGE_NAME}:prod" -t "${IMAGE_NAME}:latest")' in script
+    assert "${IMAGE_NAME}:main" not in script
     assert "for attempt in 1 2 3" in script
     assert "docker buildx imagetools create" in script
     assert "sleep 20" in script
     assert 'docker buildx imagetools inspect "${IMAGE_NAME}:sha-${GITHUB_SHA}"' in script
-    assert "GITHUB_SHA::" not in script
-    assert re.search(r'\$\{IMAGE_NAME\}:\$\{GITHUB_SHA(?:::[^}]*)?\}', script) is None
 
 
 def test_actions_are_pinned_and_local_actions_exist() -> None:
@@ -311,12 +309,18 @@ def test_no_internal_variants_or_specs_are_restored() -> None:
     assert not (REPO_ROOT / ".github" / "actions" / "hermes-aio-smoke-test").exists()
 
 
-def test_fork_docker_mode_bakes_extras_and_disables_runtime_installs() -> None:
+def test_fork_docker_mode_bakes_extras_and_skips_runtime_refresh() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    stage2 = (REPO_ROOT / "docker" / "stage2-hook.sh").read_text(encoding="utf-8")
     assert "ARG HERMES_FORK_ALL_EXTRAS" in dockerfile
+    assert "ARG HERMES_IMAGE_NAME=hermes-agent" in dockerfile
     assert "--no-install-project --sealed" in dockerfile
     assert 'excluded={"kittentts", "termux", "termux-all"}' in dockerfile
     assert "ENV HERMES_DISABLE_LAZY_INSTALLS=${HERMES_FORK_ALL_EXTRAS}" in dockerfile
     assert "installed_extras(root, root / \".venv\"" in dockerfile
     assert "write_features(" in dockerfile
+    assert '"dependency_policy": "sealed"' in dockerfile
+    assert "HERMES_IMAGE_NAME" in dockerfile
     assert "libportaudio2" in dockerfile
+    assert 'marker.get("dependency_policy") == "sealed"' in stage2
+    assert "skipping PM refresh" in stage2

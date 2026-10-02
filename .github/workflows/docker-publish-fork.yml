@@ -2,7 +2,7 @@ name: Docker Build, Test, and Publish (Fork)
 
 on:
   push:
-    branches: [main]
+    branches: [prod]
   workflow_dispatch:
 
 permissions:
@@ -16,8 +16,15 @@ env:
   IMAGE_NAME: ${{ vars.FORK_IMAGE_NAME || format('ghcr.io/{0}/hermes-agent', github.repository_owner) }}
 
 jobs:
+  # Build and test on native runners without registry credentials. The tested
+  # image is handed to publish as a tar archive so publish never rebuilds it.
   build:
-    if: github.repository != 'NousResearch/hermes-agent'
+    if: >-
+      github.repository != 'NousResearch/hermes-agent' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/prod') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/prod'))
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -73,8 +80,12 @@ jobs:
           load: true
           platforms: ${{ matrix.platform }}
           tags: ${{ steps.image.outputs.image_name }}:test
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
+            HERMES_IMAGE_NAME=${{ steps.image.outputs.image_name }}
             HERMES_FORK_ALL_EXTRAS=1
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ matrix.cache-to }}
@@ -101,12 +112,51 @@ jobs:
         run: |
           scripts/run_tests.sh tests/docker/ --file-timeout 600
 
+      - name: Save tested image archive
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/image-artifacts
+          docker image inspect "${IMAGE_NAME}:test" > /tmp/image-artifacts/image-inspect.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          image = json.loads(Path('/tmp/image-artifacts/image-inspect.json').read_text())[0]
+          if image['Architecture'] != os.environ['ARCH']:
+              raise SystemExit('Docker image architecture mismatch')
+          Path('/tmp/image-artifacts/identity.json').write_text(json.dumps({
+              'commit': os.environ['GITHUB_SHA'],
+              'arch': os.environ['ARCH'],
+              'imageId': image['Id'],
+          }), encoding='utf-8')
+          PY
+          docker save --output "/tmp/image-artifacts/image-${ARCH}.tar" "${IMAGE_NAME}:test"
+          sha256sum "/tmp/image-artifacts/image-${ARCH}.tar" \
+            > "/tmp/image-artifacts/image-${ARCH}.tar.sha256"
+
+      - name: Upload tested image archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: docker-test-image-${{ matrix.arch }}
+          path: |
+            /tmp/image-artifacts/image-${{ matrix.arch }}.tar
+            /tmp/image-artifacts/image-${{ matrix.arch }}.tar.sha256
+            /tmp/image-artifacts/identity.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  # Load and publish the exact archives that passed the Docker suite. This job
+  # owns the layer push; merge below has only the registry-side manifest step.
   publish:
     needs: [build]
     if: >-
       github.repository != 'NousResearch/hermes-agent' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      ((github.event_name == 'push' && github.ref == 'refs/heads/prod') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/prod'))
     permissions:
       contents: read
       packages: write
@@ -116,28 +166,16 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-latest
-            platform: linux/amd64
-            cache-from: type=gha,scope=fork-docker-amd64
-            cache-to: type=gha,mode=max,scope=fork-docker-amd64
           - arch: arm64
             runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            cache-from: type=gha,scope=fork-docker-arm64
-            cache-to: type=gha,mode=max,scope=fork-docker-arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
-      - name: Checkout trusted source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Write install stamp
-        run: |
-          python3 scripts/write_install_stamp.py \
-            --output install-stamp.json \
-            --commit "$GITHUB_SHA" \
-            --source ci \
-            --distribution docker \
-            --update-mechanism external
+      - name: Download tested image archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-test-image-${{ matrix.arch }}
+          path: /tmp/image-artifacts
 
       - name: Normalize image name
         id: image
@@ -148,6 +186,16 @@ jobs:
           image_name="$(printf '%s' "${RAW_IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
           echo "image_name=${image_name}" >> "${GITHUB_OUTPUT}"
 
+      - name: Verify tested image archive
+        env:
+          ARCH: ${{ matrix.arch }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd /tmp/image-artifacts
+          sha256sum --check "image-${ARCH}.tar.sha256"
+          test -s identity.json
+
       - name: Set up Docker Buildx
         id: buildx
         continue-on-error: true
@@ -157,6 +205,29 @@ jobs:
         if: steps.buildx.outcome == 'failure'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
+      - name: Load and verify tested image
+        env:
+          ARCH: ${{ matrix.arch }}
+          COMMIT: ${{ github.sha }}
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+        run: |
+          set -euo pipefail
+          docker load --input "/tmp/image-artifacts/image-${ARCH}.tar"
+          docker image inspect "${IMAGE_NAME}:test" > /tmp/image-artifacts/loaded.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          identity = json.loads(Path('/tmp/image-artifacts/identity.json').read_text())
+          loaded = json.loads(Path('/tmp/image-artifacts/loaded.json').read_text())[0]
+          expected = (os.environ['COMMIT'], os.environ['ARCH'])
+          actual = (identity['commit'], identity['arch'])
+          if actual != expected:
+              raise SystemExit(f'Tested Docker archive identity mismatch: {actual!r} != {expected!r}')
+          if (loaded['Id'], loaded['Architecture']) != (identity['imageId'], identity['arch']):
+              raise SystemExit('Loaded Docker image differs from tested image')
+          PY
+
       - name: Log in to ghcr.io
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
@@ -164,44 +235,47 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push ${{ matrix.arch }} by digest
-        id: push
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
-        with:
-          context: .
-          file: Dockerfile
-          platforms: ${{ matrix.platform }}
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          build-args: |
-            HERMES_GIT_SHA=${{ github.sha }}
-            HERMES_FORK_ALL_EXTRAS=1
-          outputs: type=image,name=${{ steps.image.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: ${{ matrix.cache-from }}
-          cache-to: ${{ matrix.cache-to }}
-
-      - name: Export digest
-        shell: bash
+      - name: Push tested image with temporary architecture tag
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
         run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.push.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          set -euo pipefail
+          docker tag "${IMAGE_NAME}:test" "${IMAGE_NAME}:build-${GITHUB_SHA}-${ARCH}"
+          docker push "${IMAGE_NAME}:build-${GITHUB_SHA}-${ARCH}"
 
-      - name: Upload digest artifact
+      - name: Record pushed architecture digest
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          digest="$(docker buildx imagetools inspect \
+            "${IMAGE_NAME}:build-${GITHUB_SHA}-${ARCH}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          if ! printf '%s' "${digest}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "Unexpected pushed image digest: ${digest}" >&2
+            exit 1
+          fi
+          printf '%s' "${digest#sha256:}" > "/tmp/digests/${ARCH}"
+
+      - name: Upload tested image digest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: digest-${{ matrix.arch }}
-          path: /tmp/digests/*
+          path: /tmp/digests/${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 1
 
+  # Registry-side only: assemble the two tested per-architecture images. This
+  # operation creates no layers and never rebuilds the Dockerfile.
   merge:
     needs: [publish]
     if: >-
       github.repository != 'NousResearch/hermes-agent' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      ((github.event_name == 'push' && github.ref == 'refs/heads/prod') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/prod'))
     permissions:
       contents: read
       packages: write
@@ -247,6 +321,7 @@ jobs:
           IMAGE_NAME: ${{ steps.image.outputs.image_name }}
         run: |
           set -euo pipefail
+          shopt -s nullglob
 
           digest_files=(*)
           if [ "${#digest_files[@]}" -ne 2 ]; then
@@ -256,12 +331,17 @@ jobs:
 
           args=()
           for digest_file in "${digest_files[@]}"; do
-            args+=("${IMAGE_NAME}@sha256:${digest_file}")
+            digest="$(cat "${digest_file}")"
+            if ! printf '%s' "${digest}" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "Invalid digest file: ${digest_file}" >&2
+              exit 1
+            fi
+            args+=("${IMAGE_NAME}@sha256:${digest}")
           done
 
           tags=(-t "${IMAGE_NAME}:sha-${GITHUB_SHA}")
-          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            tags+=(-t "${IMAGE_NAME}:main" -t "${IMAGE_NAME}:latest")
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/prod" ]; then
+            tags+=(-t "${IMAGE_NAME}:prod" -t "${IMAGE_NAME}:latest")
           fi
 
           for attempt in 1 2 3; do
@@ -277,7 +357,7 @@ jobs:
           done
 
           docker buildx imagetools inspect "${IMAGE_NAME}:sha-${GITHUB_SHA}"
-          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            docker buildx imagetools inspect "${IMAGE_NAME}:main"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/prod" ]; then
+            docker buildx imagetools inspect "${IMAGE_NAME}:prod"
             docker buildx imagetools inspect "${IMAGE_NAME}:latest"
           fi

@@ -650,21 +650,40 @@ fi
 # volume, selected by $HERMES_HOME/installs/*/facts.json. An image upgrade
 # replaces uv.lock under that durable selection, so re-resolve it here, before
 # any supervised service boots onto a generation built for the previous image.
-# On failure (e.g. offline) PM falls back to the image's own environment and
-# keeps the extras recorded for the next boot or install. Then collect the
-# generations nothing selects any more: no service holds a lease yet, and
-# collect_generations keeps anything younger than a day.
-s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" -c '
+#
+# Fork images seal every Linux-compatible optional extra into /opt/hermes/.venv
+# during the build. Their provenance marker makes that payload authoritative;
+# refreshing a writable generation would be both unnecessary and a source of
+# first-boot network latency. Official images keep the refresh path below.
+if /usr/bin/python3 -c '
+import json
+import sys
 from pathlib import Path
-from hermes_cli.runtime_state import collect_generations
-from pm.environments import install_state_dir
-from pm.recovery import refresh_dependencies
-from pm.runtime import collect_runtime_generations
-root = Path("'"$INSTALL_DIR"'")
-print("[stage2] dependency environment:", refresh_dependencies(root))
-removed = collect_generations(root) + collect_runtime_generations(install_state_dir(root) / "pm-runtime")
-print("[stage2] collected", len(removed), "unused dependency generations")
-' || echo "[stage2] Warning: dependency refresh failed; continuing"
+
+try:
+    marker = json.loads(Path("/etc/hermes/image-provenance.json").read_text(encoding="utf-8"))
+except (OSError, ValueError, TypeError):
+    sys.exit(1)
+sys.exit(0 if marker.get("dependency_policy") == "sealed" else 1)
+'; then
+    echo "[stage2] sealed dependency image: using baked environment; skipping PM refresh"
+else
+    # On failure (e.g. offline) PM falls back to the image's own environment
+    # and keeps the extras recorded for the next boot or install. Then collect
+    # generations nothing selects any more: no service holds a lease yet, and
+    # collect_generations keeps anything younger than a day.
+    s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" -c '
+    from pathlib import Path
+    from hermes_cli.runtime_state import collect_generations
+    from pm.environments import install_state_dir
+    from pm.recovery import refresh_dependencies
+    from pm.runtime import collect_runtime_generations
+    root = Path("'"$INSTALL_DIR"'")
+    print("[stage2] dependency environment:", refresh_dependencies(root))
+    removed = collect_generations(root) + collect_runtime_generations(install_state_dir(root) / "pm-runtime")
+    print("[stage2] collected", len(removed), "unused dependency generations")
+    ' || echo "[stage2] Warning: dependency refresh failed; continuing"
+fi
 
 # auth.json: bootstrap from env on first boot only. Same semantics as the
 # pre-s6 entrypoint — the [ ! -f ] guard is critical to avoid clobbering
