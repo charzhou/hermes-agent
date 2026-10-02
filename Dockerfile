@@ -76,7 +76,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/tools
 RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     ca-certificates curl iputils-ping python3 python-is-python3 gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git openssh-client docker-cli xz-utils \
-    libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 && \
+    libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libportaudio2 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 && \
     rm -rf /var/lib/apt/lists/*
 
 # Bot Screen (opt-in): PACKAGES["apt"] from tools/bot_desktop/runtime.py plus apt
@@ -242,14 +242,11 @@ FROM runtime_base AS python_deps
 # frontend stats the readme path during dep resolution, so we `touch` an
 # empty placeholder — the real README is restored by `COPY . .` below.
 #
-# `pm.build_env --no-install-project --extra all --extra messaging --extra otlp`
-# installs the deps reachable through the composite `[all]` extra
-# (handpicked set intended for the production image; dependency groups are not selected),
-# plus gateway messaging adapters that should work in the published image
-# without a first-boot lazy install.  We do NOT use `--all-extras`:
-# that would pull in `[rl]` (atroposlib + tinker + torch + wandb from
-# git) and `[yc-bench]` (another git dep), neither of which belongs in
-# the published container.
+# The official image uses a curated production set below.  The fork workflow
+# passes HERMES_FORK_ALL_EXTRAS=1, which expands this to every declared
+# optional extra that is meaningful in a Linux container.  Keeping the switch
+# here preserves the upstream image's size and runtime behavior while making
+# the fork image fully usable without a first-boot dependency install.
 #
 # Provider packages (anthropic, bedrock, azure-identity) are included
 # so Docker users can use these providers without requiring runtime
@@ -273,10 +270,19 @@ FROM runtime_base AS python_deps
 # Source binding is created after the source copy below.
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
-RUN python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
-    --out /opt/hermes/.venv --no-install-project --sealed \
-    --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
-    --extra azure-identity --extra matrix --extra google-chat
+ARG HERMES_FORK_ALL_EXTRAS
+RUN set -eu; \
+    if [ "${HERMES_FORK_ALL_EXTRAS:-}" = "1" ]; then \
+        extra_args="$(python3 -c 'import tomllib; p=tomllib.load(open("pyproject.toml", "rb")); excluded={"termux", "termux-all"}; print(" ".join(f"--extra {name}" for name in sorted(p["project"]["optional-dependencies"]) if name not in excluded))')"; \
+        set -- $extra_args; \
+        python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
+            --out /opt/hermes/.venv --no-install-project --sealed "$@"; \
+    else \
+        python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
+            --out /opt/hermes/.venv --no-install-project --sealed \
+            --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
+            --extra azure-identity --extra matrix --extra google-chat; \
+    fi
 
 # Icons render on the runtime environment: Pillow and resvg-py are core
 # dependencies. A stage of its own so the frontend stage keeps building its
@@ -453,10 +459,13 @@ ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
 ENV HERMES_HOME=/opt/data
 ENV HERMES_WRITE_SAFE_ROOT=/opt/data
+ARG HERMES_FORK_ALL_EXTRAS
+ENV HERMES_DISABLE_LAZY_INSTALLS=${HERMES_FORK_ALL_EXTRAS}
 # Opt-in backend SDKs install on first use into PM dependency generations under
 # /opt/data/installs (the sealed /opt/hermes/.venv is never written); stage2
 # re-resolves them against each new image. security.allow_lazy_installs: false
-# turns this off.
+# turns this off. Fork full-extra images set the environment above so gateway
+# startup never blocks on a PM sync.
 
 # Xfce, dbus and the display-allocation lock need one; containers have no logind
 # to create /run/user/<uid>. The default fallback ($HOME/.cache) is the /opt/data

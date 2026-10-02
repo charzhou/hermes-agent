@@ -12,6 +12,7 @@ second source of truth for runtime behavior.
 | Feishu delivery behavior | `plugins/platforms/feishu/adapter_mentions.py`, `adapter_reply.py`, gateway delivery metadata and adapter plumbing | Preserve mention targeting, reply threading, and delivery metadata. Resolve conflicts by tracing the real gateway-to-adapter path and run Feishu gateway tests. |
 | TUI/source integration | TUI gateway and desktop/TUI session source propagation | Preserve explicit session source/platform identity. Validate with the TUI gateway tests after any gateway session refactor. |
 | OpenAI image compatibility | OpenAI provider image request path and its focused tests | Keep the provider-specific endpoint behavior isolated from generic model routing. |
+| Fork Docker dependency closure | `Dockerfile`, `.github/workflows/docker-publish-fork.yml` | Fork images build every declared Linux-container optional extra into the sealed venv and disable runtime lazy installs; keep the official image's curated default unchanged. |
 | Fork packaging/CI | Fork-owned Docker/workflow files | Keep deployment changes fork-specific unless upstream adopts the same workflow. |
 
 ## Upstream sync procedure

@@ -33,7 +33,7 @@ jobs:
             cache-from: type=gha,scope=fork-docker-arm64
             cache-to: type=gha,mode=max,scope=fork-docker-arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -75,6 +75,7 @@ jobs:
           tags: ${{ steps.image.outputs.image_name }}:test
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
+            HERMES_FORK_ALL_EXTRAS=1
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ matrix.cache-to }}
 
@@ -124,7 +125,7 @@ jobs:
             cache-from: type=gha,scope=fork-docker-arm64
             cache-to: type=gha,mode=max,scope=fork-docker-arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - name: Checkout trusted source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -175,6 +176,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
+            HERMES_FORK_ALL_EXTRAS=1
           outputs: type=image,name=${{ steps.image.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ matrix.cache-to }}

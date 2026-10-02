@@ -168,6 +168,7 @@ def test_build_is_credential_free_and_runs_full_docker_gate() -> None:
     assert config["platforms"] == "${{ matrix.platform }}"
     assert config["tags"] == "${{ steps.image.outputs.image_name }}:test"
     assert "HERMES_GIT_SHA=${{ github.sha }}" in config["build-args"]
+    assert "HERMES_FORK_ALL_EXTRAS=1" in config["build-args"]
     assert config["cache-from"] == "${{ matrix.cache-from }}"
     assert config["cache-to"] == "${{ matrix.cache-to }}"
     assert config.get("push") is not True
@@ -224,6 +225,7 @@ def test_publish_is_credentialed_digest_only_and_test_free() -> None:
         "type=image,name=${{ steps.image.outputs.image_name }},"
         "push-by-digest=true,name-canonical=true,push=true"
     )
+    assert "HERMES_FORK_ALL_EXTRAS=1" in config["build-args"]
     assert "tags" not in config
     assert "org.opencontainers.image.revision=${{ github.sha }}" in config["labels"]
     assert (
@@ -307,3 +309,12 @@ def test_no_internal_variants_or_specs_are_restored() -> None:
     assert not (REPO_ROOT / ".github" / "docker" / "fork-feishu-overlay.Dockerfile").exists()
     assert not (REPO_ROOT / ".github" / "docker" / "fork-aio-overlay.Dockerfile").exists()
     assert not (REPO_ROOT / ".github" / "actions" / "hermes-aio-smoke-test").exists()
+
+
+def test_fork_docker_mode_bakes_extras_and_disables_runtime_installs() -> None:
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "ARG HERMES_FORK_ALL_EXTRAS" in dockerfile
+    assert "--no-install-project --sealed" in dockerfile
+    assert 'excluded={"termux", "termux-all"}' in dockerfile
+    assert "ENV HERMES_DISABLE_LAZY_INSTALLS=${HERMES_FORK_ALL_EXTRAS}" in dockerfile
+    assert "libportaudio2" in dockerfile
