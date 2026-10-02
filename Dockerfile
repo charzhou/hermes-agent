@@ -244,7 +244,9 @@ FROM runtime_base AS python_deps
 #
 # The official image uses a curated production set below.  The fork workflow
 # passes HERMES_FORK_ALL_EXTRAS=1, which expands this to every declared
-# optional extra that is meaningful in a Linux container.  Keeping the switch
+# optional extra that is compatible with the Linux container target.  The
+# opt-in KittenTTS closure stays out because its Torch CUDA transitive wheel
+# set is not portable across the amd64/arm64 image matrix. Keeping the switch
 # here preserves the upstream image's size and runtime behavior while making
 # the fork image fully usable without a first-boot dependency install.
 #
@@ -273,7 +275,7 @@ RUN touch ./README.md
 ARG HERMES_FORK_ALL_EXTRAS
 RUN set -eu; \
     if [ "${HERMES_FORK_ALL_EXTRAS:-}" = "1" ]; then \
-        extra_args="$(python3 -c 'import tomllib; p=tomllib.load(open("pyproject.toml", "rb")); excluded={"termux", "termux-all"}; print(" ".join(f"--extra {name}" for name in sorted(p["project"]["optional-dependencies"]) if name not in excluded))')"; \
+        extra_args="$(python3 -c 'import tomllib; p=tomllib.load(open("pyproject.toml", "rb")); excluded={"kittentts", "termux", "termux-all"}; print(" ".join(f"--extra {name}" for name in sorted(p["project"]["optional-dependencies"]) if name not in excluded))')"; \
         set -- $extra_args; \
         python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
             --out /opt/hermes/.venv --no-install-project --sealed "$@"; \
