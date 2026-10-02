@@ -64,6 +64,59 @@ def test_boot_uses_one_selected_dependency_tree_in_fresh_process(tmp_path, monke
     assert process.stdout.splitlines() == ["new", "True"]
 
 
+def test_sealed_fork_boot_prefers_bundled_dependencies_over_stale_generation(tmp_path, monkeypatch):
+    """A fork image must keep using its baked venv when an older data volume
+    still records a partial PM generation.
+
+    The generation remains available for explicit PM operations, but it must
+    not hide packages already shipped in the immutable payload at gateway
+    startup. This is the production failure mode behind adapters reporting
+    ``aiohttp not installed`` even though the image contains it.
+    """
+    import os
+    import subprocess
+    import sys
+    from pm import environments as runtime_paths
+
+    payload = tmp_path / "payload"
+    root = payload / "hermes-agent"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HERMES_DISABLE_LAZY_INSTALLS", "1")
+    bundled = root / ".venv"
+    stale = runtime_paths.install_state_dir(root) / "environments" / "old" / "venv"
+    for environment, value in ((bundled, "bundled"), (stale, "stale")):
+        site = runtime_paths.site_packages(environment)
+        site.mkdir(parents=True)
+        (environment / "pyvenv.cfg").write_text("version = 3.14\n", encoding="utf-8")
+        (site / "probe_package.py").write_text(f"value = {value!r}\n", encoding="utf-8")
+
+    (root / "manifest.json").write_text(
+        json.dumps({"repo": ".", "venv": bundled.relative_to(root).as_posix(), "store": "tools"}),
+        encoding="utf-8",
+    )
+    (root / "enabled-features.json").write_text(
+        json.dumps({"schema": 1, "extras": ["messaging"]}), encoding="utf-8",
+    )
+    state = runtime_paths.install_state_dir(root)
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "facts.json").write_text(json.dumps({"schema": 1, "packages": {
+        "venv": {"environment": str(stale)},
+    }}), encoding="utf-8")
+    code = (
+        "import sys; from pathlib import Path; "
+        "from pm.environments import activate_dependencies; "
+        "activate_dependencies(Path(sys.argv[1])); "
+        "import probe_package; print(probe_package.value)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root)],
+        env=dict(os.environ), text=True, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "bundled"
+
+
 def test_boot_puts_the_checkout_launcher_ahead_of_the_venvs_own_console_script(tmp_path, monkeypatch):
     """#124627: the venv's `hermes` console script is an editable install bound to the
     build-time source snapshot. A child resolving `hermes` off PATH must reach the

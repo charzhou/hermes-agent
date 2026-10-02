@@ -317,4 +317,6 @@ def test_fork_docker_mode_bakes_extras_and_disables_runtime_installs() -> None:
     assert "--no-install-project --sealed" in dockerfile
     assert 'excluded={"kittentts", "termux", "termux-all"}' in dockerfile
     assert "ENV HERMES_DISABLE_LAZY_INSTALLS=${HERMES_FORK_ALL_EXTRAS}" in dockerfile
+    assert "installed_extras(root, root / \".venv\"" in dockerfile
+    assert "write_features(" in dockerfile
     assert "libportaudio2" in dockerfile

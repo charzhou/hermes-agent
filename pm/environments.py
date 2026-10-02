@@ -94,14 +94,22 @@ def record_activation_inputs(stamps: Path, mtimes: dict[str, int], project_root:
 def payload_venv(project_root: Path) -> Path | None:
     """The environment a sealed payload ships beside its tree, or ``None``."""
     root = Path(project_root).resolve()
-    manifest_path = root.parent / "manifest.json"
-    if manifest_path.is_file():
+    # Contained bundles put ``manifest.json`` beside the repo directory. Docker
+    # uses the fixed layout and puts the manifest in the repo root itself with
+    # ``repo: "."``; both are sealed payloads and must be discoverable before
+    # PM selects a writable generation from the data volume.
+    candidates = ((root.parent / "manifest.json", root.parent),
+                  (root / "manifest.json", root))
+    for manifest_path, payload_root in candidates:
+        if not manifest_path.is_file():
+            continue
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        if (root.parent / manifest.get("repo", "")).resolve() == root:
-            venv = (root.parent / manifest["venv"]).resolve()
-            if not venv.is_relative_to(root.parent):
-                raise RuntimeError("payload environment escapes its root")
-            return venv
+        if (payload_root / manifest.get("repo", "")).resolve() != root:
+            continue
+        venv = (payload_root / manifest["venv"]).resolve()
+        if not venv.is_relative_to(payload_root):
+            raise RuntimeError("payload environment escapes its root")
+        return venv
     return None
 
 
@@ -302,6 +310,26 @@ def _require_own_dependencies(project_root: Path) -> None:
         raise RuntimeError("no dependency environment is committed for this install")
 
 
+def _sealed_payload_is_authoritative(project_root: Path) -> bool:
+    """Whether the bundled venv is the complete runtime for this process.
+
+    Fork Docker images bake their optional Python dependencies into the sealed
+    payload and set ``HERMES_DISABLE_LAZY_INSTALLS``.  A durable PM generation
+    may still exist on a data volume from an older image (or from a partial
+    first boot); activating it would replace the bundled site-packages with
+    that incomplete tree and make already-shipped adapters appear missing.
+    Keep this probe stdlib-only: it runs before any third-party import.
+    """
+    root = Path(project_root).resolve()
+    if payload_venv(root) is None or not any(
+        (directory / "enabled-features.json").is_file() for directory in (root, root.parent)
+    ):
+        return False
+    return os.environ.get("HERMES_DISABLE_LAZY_INSTALLS", "").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
 def activate_dependencies(project_root: Path) -> None:
     """Select the committed tree at process boot, before third-party imports.
 
@@ -310,8 +338,9 @@ def activate_dependencies(project_root: Path) -> None:
     """
     import sys
 
+    payload_authoritative = _sealed_payload_is_authoritative(project_root)
     state = install_state_dir(project_root)
-    if state.is_dir():
+    if state.is_dir() and not payload_authoritative:
         from hermes_cli.runtime_state import runtime_lock, recover_publication, lease_generation
         # The lock's holder may be another profile's backend running a full dependency rebuild;
         # this process only reads the committed selection, so it proceeds without waiting rather
