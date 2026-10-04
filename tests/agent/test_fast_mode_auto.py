@@ -66,13 +66,19 @@ def test_bounded_fast_window_policy(monkeypatch):
         ("nous", "https://inference-api.nousresearch.com/v1"),
         ("copilot", "https://api.githubcopilot.com"),
         ("azure", "https://foo.openai.azure.com"),
-        ("custom", "http://10.0.0.1:8000/v1"),
         ("openai", "https://proxy.example.com/v1"),
     ):
         proxied = _agent(provider=provider, base_url=base_url)
         fast_mode.begin_turn(proxied, conversation_history=[])
         assert "service_tier" not in fast_mode.effective_request_overrides(proxied), provider
         assert resolve_fast_mode_overrides("gpt-5.4", provider=provider, base_url=base_url) is None
+    for provider in ("custom", "custom:relay"):
+        custom = _agent(provider=provider, base_url="https://gateway.example.com/v1")
+        fast_mode.begin_turn(custom, conversation_history=[])
+        assert fast_mode.effective_request_overrides(custom)["service_tier"] == "priority"
+        assert resolve_fast_mode_overrides(
+            "gpt-5.4", provider=provider, base_url="https://gateway.example.com/v1"
+        ) == {"service_tier": "priority"}
     assert resolve_fast_mode_overrides(
         "claude-opus-5", provider="bedrock", base_url="https://bedrock-runtime.us-east-1.amazonaws.com"
     ) is None

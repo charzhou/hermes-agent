@@ -1172,10 +1172,16 @@ def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
 
 def _fast_mode_route_supported(
     model_id: Optional[str], provider: Optional[str], base_url: Optional[str]) -> bool:
-    """Only the first-party endpoint that bills for fast mode may receive its params."""
+    """Allow fast-mode params on first-party routes and custom OpenAI-compatible routes."""
     from urllib.parse import urlparse
 
     from agent.model_metadata import is_grok_46_family
+
+    provider_id = normalize_provider(provider)
+    if provider_id == "custom" or provider_id.startswith("custom:"):
+        # A custom endpoint is an explicit operator choice. Hermes cannot verify
+        # its billing semantics, so only eligible OpenAI models opt in here.
+        return _is_openai_fast_model(model_id)
 
     if _is_anthropic_fast_model(model_id):
         allowed = {"anthropic": "api.anthropic.com"}
@@ -1187,7 +1193,7 @@ def _fast_mode_route_supported(
             "openai-api": "api.openai.com",
             "openai-codex": "chatgpt.com",
         }
-    if provider and normalize_provider(provider) not in allowed:
+    if provider and provider_id not in allowed:
         return False
     host = (urlparse(str(base_url or "")).hostname or "").lower()
     return not host or host in allowed.values()

@@ -563,9 +563,9 @@ _LIVE_FIRST_PICKER_PROVIDERS: frozenset[str] = frozenset({"opencode-zen", "openc
 
 # Models supporting OpenAI Priority Processing (service_tier="priority"; see
 # openai.com/api-priority-processing). Pattern-based: any OpenAI flagship (gpt-*, o1*, o3*, o4*).
-# Non-OpenAI endpoints (OpenRouter/Copilot/opencode-zen proxies) strip service_tier, so false
-# positives are harmless. Codex-series models are excluded — the Codex Responses API doesn't
-# expose service_tier.
+# Non-OpenAI endpoints (OpenRouter/Copilot/opencode-zen proxies) strip service_tier. Custom
+# OpenAI-compatible endpoints are opted in by the route-aware gate in models.py. Codex-series
+# models are excluded — the Codex Responses API doesn't expose service_tier.
 _OPENAI_FAST_MODE_PREFIXES: tuple[str, ...] = ("gpt-", "o1", "o3", "o4")
 # OpenAI Ultrafast (service_tier="ultrafast", 6x Standard): broadly available for GPT-6 Astra only
 # (developers.openai.com/api/docs/guides/ultrafast-mode, 2026-09-29); GPT-6.1 Sol "coming soon".

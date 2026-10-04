@@ -104,6 +104,14 @@ class TestPriorityProcessingModels(unittest.TestCase):
         assert model_supports_fast_mode("grok-4.5") is False
         assert resolve_fast_mode_overrides("grok-4.6") == {"service_tier": "priority"}
 
+    def test_custom_openai_compatible_provider_can_use_priority_processing(self):
+        from hermes_cli.models import resolve_fast_mode_overrides
+
+        for provider in ("custom", "custom:relay"):
+            assert resolve_fast_mode_overrides(
+                "gpt-5.4", provider=provider, base_url="https://gateway.example.com/v1"
+            ) == {"service_tier": "priority"}
+
 class TestFastModeRouting(unittest.TestCase):
     def test_fast_command_exposed_for_model_even_when_provider_is_auto(self):
         cli_mod = _import_cli()

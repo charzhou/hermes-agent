@@ -1960,7 +1960,7 @@ The override applies automatically everywhere: CLI startup, `hermes -p` one-shot
 
 ## Fast Mode
 
-Fast mode asks the provider for faster output at a premium price: OpenAI [Priority Processing](https://openai.com/api-priority-processing/) (`service_tier: priority`) and Ultrafast (`service_tier: ultrafast`) on supported OpenAI models, xAI Priority Processing on Grok 4.6, and Anthropic [Fast Mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode) (`speed: fast`, Opus 4.8 / Opus 5 / Opus 5.5 only). The `openai` and `openai-api` providers use the first-party OpenAI endpoint. It is **off by default**.
+Fast mode asks the provider for faster output at a premium price: OpenAI [Priority Processing](https://openai.com/api-priority-processing/) (`service_tier: priority`) and Ultrafast (`service_tier: ultrafast`) on supported OpenAI models, xAI Priority Processing on Grok 4.6, and Anthropic [Fast Mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode) (`speed: fast`, Opus 4.8 / Opus 5 / Opus 5.5 only). Custom OpenAI-compatible providers may also receive `service_tier: priority` for eligible GPT/O models. It is **off by default**.
 
 ```yaml
 agent:
@@ -1987,7 +1987,7 @@ When an Anthropic organization has no fast-mode capacity for a model (the API an
 
 ### Fast tiers behind a gateway or proxy
 
-The first-party-only rule is deliberate: a fast-tier parameter is a billing instruction, and Hermes only sends it to the endpoint whose price list it knows. If you run an OpenAI-compatible gateway, router, or proxy that exposes its own priority tier (its own `service_tier` value, or a differently named field), request it through that provider's `extra_body` instead of `agent.service_tier`. `extra_body` on a [named custom provider](../integrations/providers.md#named-custom-providers) is merged into **every** chat-completions request routed to that endpoint, survives gateway turns and `/fast` changes, and is dropped again when you `/model` away from the provider:
+Fast-mode billing is endpoint-specific. Hermes sends the standard `service_tier: priority` field to first-party OpenAI routes and to custom routes only for eligible GPT/O models; Hermes cannot verify how a custom endpoint bills or implements that field. If you run an OpenAI-compatible gateway that exposes its own priority tier (its own `service_tier` value, or a differently named field), request it through that provider's `extra_body` instead of `agent.service_tier`. `extra_body` on a [named custom provider](../integrations/providers.md#named-custom-providers) is merged into **every** chat-completions request routed to that endpoint, survives gateway turns and `/fast` changes, and is dropped again when you `/model` away from the provider:
 
 ```yaml
 providers:
