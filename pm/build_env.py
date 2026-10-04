@@ -17,6 +17,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--cache", type=Path)
     parser.add_argument("--extra", dest="extras", action="append", default=[])
     parser.add_argument("--group", dest="groups", action="append", default=[])
+    parser.add_argument("--plugin", dest="plugins", action="append", type=Path, default=[],
+                        help="include a plugin's declared dependencies in the build workspace")
     parser.add_argument("--all-extras", action="store_true")
     parser.add_argument("--no-install-project", action="store_true")
     parser.add_argument("--resolve", action="store_true", help="resolve the source lock before building")
@@ -59,6 +61,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                  or args.prune_cache or args.exact_lock)
     if build and args.out is None:
         parser.error("--out is required when building an environment")
+    if args.plugins and (not build or requirements or args.manager_runtime):
+        parser.error("--plugin requires a project environment build")
     if args.manager_runtime and args.python is None:
         parser.error("--manager-runtime requires the target --python")
     try:
@@ -96,6 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             executable = pm.build_environment(
                 source=args.source, out=args.out, python=args.python, cache=args.cache,
                 extras=args.extras, groups=args.groups, all_extras=args.all_extras,
+                plugins=args.plugins,
                 no_install_project=args.no_install_project, frozen=not args.resolve,
                 sealed=args.sealed, offline=args.offline, explicit=True,
             )

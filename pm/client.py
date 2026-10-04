@@ -274,6 +274,7 @@ def build_environment(
     *, source: Path, out: Path, python: Path | None = None,
     cache: Path | None = None, env: Mapping[str, str] | None = None,
     extras: Sequence[str] = (), groups: Sequence[str] = (),
+    plugins: Sequence[Path] = (),
     all_extras: bool = False, no_install_project: bool = False,
     frozen: bool = True, sealed: bool = False, offline: bool = False,
     explicit: bool = False, timeout: int = 1800,
@@ -282,6 +283,7 @@ def build_environment(
     return Path(_python_operation("build_environment", {
         "source": Path(source), "out": Path(out), "python": python, "cache": cache,
         "env": dict(env) if env is not None else None, "extras": list(extras), "groups": list(groups),
+        "plugins": [str(Path(path).absolute()) for path in plugins],
         "all_extras": all_extras, "no_install_project": no_install_project,
         "frozen": frozen, "sealed": sealed, "offline": offline,
         "explicit": explicit, "timeout": timeout,

@@ -29,6 +29,16 @@ The image's Python environment follows `pyproject.toml` and `uv.lock` (currently
 Python 3.14). Its curated extras are not the native desktop bundle's
 `--all-extras` set. It does not include an Electron desktop app.
 
+Fork builds with `HERMES_FORK_ALL_EXTRAS=1` bundle the standalone Honcho
+memory plugin at the SHA in `plugin-catalog/honcho.yaml`. PM installs its
+declared dependencies together with the core in a generated build workspace;
+a separate `honcho` extra is not required. The combined dependency lock is
+retained as `.venv/uv.lock`. The provider loads from the image's
+`plugins/memory/honcho` directory when a profile selects `memory.provider: honcho`;
+the first API run does not need to clone the plugin or install its dependencies.
+The generated `catalog-pin.json` records its source and revision. Updating the
+bundled plugin requires rebuilding the image with an updated catalog pin.
+
 ## Quick start
 
 If this is your first time running Hermes Agent, create a data directory on the host and start the container interactively to run the setup wizard:

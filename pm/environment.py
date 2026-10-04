@@ -351,7 +351,7 @@ class PythonEnvironment:
     def sync(self, source: Path, *, extras: Sequence[str] = (), groups: Sequence[str] = (),
              timeout: int = 1800, frozen: bool = True, all_extras: bool = False,
              no_install_project: bool = False, locked: bool = False,
-             no_default_groups: bool = False) -> None:
+             no_default_groups: bool = False, no_editable: bool = False) -> None:
         """Install the root and every member; resolve only in a writable workspace.
 
         ``frozen=False`` is reserved for the caller-owned generated workspace,
@@ -366,6 +366,8 @@ class PythonEnvironment:
                    "--python", str(self.python), "--compile-bytecode"]
         if no_default_groups:
             command.append("--no-default-groups")
+        if no_editable:
+            command.append("--no-editable")
         if all_extras:
             from pm.features import opt_in_extras
 

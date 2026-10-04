@@ -91,6 +91,32 @@ jobs:
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ matrix.cache-to }}
 
+      - name: Verify bundled Honcho provider offline
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+        run: |
+          docker run --rm --network none --user hermes \
+            --entrypoint /opt/hermes/.venv/bin/python "${IMAGE_NAME}:test" -c '
+          import importlib.metadata, json, os, tempfile, tomllib
+          from pathlib import Path
+          with tempfile.TemporaryDirectory(prefix="honcho-smoke-") as home:
+              os.environ["HERMES_HOME"] = home
+              from hermes_cli.plugin_catalog import get_catalog_entry
+              from hermes_cli.memory_provider_migration import provider_present
+              from plugins.memory import find_provider_dir, load_memory_provider
+              entry = get_catalog_entry("honcho")
+              source = find_provider_dir("honcho")
+              assert source == Path("/opt/hermes/plugins/memory/honcho"), source
+              assert json.loads((source / "catalog-pin.json").read_text())["sha"] == entry.sha
+              assert provider_present("honcho", Path(home))
+              assert load_memory_provider("honcho", register_skills=False) is not None
+              assert not (Path(home) / "plugins").exists()
+              lock = tomllib.loads(Path("/opt/hermes/.venv/uv.lock").read_text())
+              sdk = next(package for package in lock["package"] if package["name"] == "honcho-ai")
+              assert sdk["version"] == importlib.metadata.version("honcho-ai")
+              print("PM installed bundled Honcho SDK:", sdk["version"])
+          '
+
       - name: Park the image install stamp while provisioning the runner toolchain
         run: mv install-stamp.json "$RUNNER_TEMP/install-stamp.json"
 

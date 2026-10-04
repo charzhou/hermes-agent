@@ -292,6 +292,26 @@ RUN set -eu; \
 # that stale generation.
 RUN /opt/hermes/.venv/bin/python -c 'from pathlib import Path; from pm.features import installed_extras, write_features; root=Path("/opt/hermes"); write_features(installed_extras(root, root / ".venv", python_exe=root / ".venv/bin/python"), root)'
 
+# Resolve plugin inputs in a build stage; copy only the final environment
+# into runtime so the bootstrap venv does not add a second dependency layer.
+FROM python_deps AS plugin_deps
+COPY --link --chmod=a+rX,go-w . .
+
+# Stage the standalone provider at its catalog pin, then let PM build one
+# core + plugin dependency graph from the plugin's own declaration.
+ARG HERMES_FORK_ALL_EXTRAS
+RUN set -eu; if [ "${HERMES_FORK_ALL_EXTRAS:-}" = "1" ]; then \
+        /opt/hermes/.venv/bin/python -m scripts.build.bundle_memory_plugin honcho; \
+        extra_args="$(python3 -c 'import tomllib; p=tomllib.load(open("pyproject.toml", "rb")); excluded={"kittentts", "termux", "termux-all"}; print(" ".join(f"--extra {name}" for name in sorted(p["project"]["optional-dependencies"]) if name not in excluded))')"; \
+        set -- $extra_args; \
+        rm -rf /opt/hermes/.venv; \
+        python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
+            --out /opt/hermes/.venv --no-install-project --sealed \
+            --plugin /opt/hermes/plugins/memory/honcho "$@"; \
+        /opt/hermes/.venv/bin/python -c 'from pathlib import Path; from pm.features import installed_extras, write_features; root=Path("/opt/hermes"); write_features(installed_extras(root, root / ".venv", python_exe=root / ".venv/bin/python"), root)'; \
+        chmod -R a+rX,go-w /opt/hermes/plugins/memory/honcho; \
+    fi
+
 # Icons render on the runtime environment: Pillow and resvg-py are core
 # dependencies. A stage of its own so the frontend stage keeps building its
 # Node dependencies in parallel with the Python ones.
@@ -321,7 +341,10 @@ COPY --from=icons /tmp/hermes-icons /tmp/hermes-icons
 RUN node scripts/build/tui.mjs --source /opt/hermes --out /opt/products/tui && \
     node scripts/build/web.mjs --source /opt/hermes --icons /tmp/hermes-icons --out /opt/products/web
 
-FROM python_deps AS runtime
+FROM runtime_base AS runtime
+COPY --from=plugin_deps /opt/hermes/.venv /opt/hermes/.venv
+COPY --from=plugin_deps /opt/hermes/enabled-features.json /opt/hermes/enabled-features.json
+COPY --from=plugin_deps /opt/hermes/plugins/memory/ /opt/hermes/plugins/memory/
 # Standalone TypeScript linting is a runtime feature; Vite/esbuild are not.
 COPY --from=frontend_build /opt/hermes/node_modules/typescript /opt/hermes/node_modules/typescript
 RUN mkdir -p /opt/hermes/node_modules/.bin && \

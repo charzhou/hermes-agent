@@ -495,12 +495,18 @@ Use the public `pm` module for Python dependency work:
 |---|---|
 | `pm.sync_venv(extras, explicit=True)` | Prepare and select the complete application dependency union, including enabled plugins. |
 | `pm.sync_venv(repair=True, explicit=True)` | Replay the recorded dependency set in a new application generation. |
-| `pm.build_environment(source=..., out=..., explicit=True)` | Build and validate a fresh caller-owned output. No plugin discovery or application selection. |
+| `pm.build_environment(source=..., out=..., explicit=True)` | Build and validate a fresh caller-owned output. Optional `plugins=[Path(...)]` inputs join the core dependency graph; no profile discovery or application selection. |
 | `pm.lock_project(source, explicit=True)` | Refresh an explicit project's lock without selecting an environment. |
 | `pm.ensure_environment(name, requirements, explicit=True)` | Prepare and select an isolated dependency generation. Return its Python path. |
 | `pm.ensure_python_tool(name, requirements, executable, explicit=True)` | Prepare an isolated tool and return its executable path. |
 | `pm.environment_python(name)` / `pm.python_tool(name, executable)` | Read selected paths without installing anything. |
 | `pm.venv_is_current()` | Ask a ready PM worker whether application dependencies are current. Return false if the manager runtime is unavailable. |
+
+For image builds, `python -m pm.build_env --source . --out /output --plugin /path/to/plugin --sealed`
+resolves the explicit plugin declarations in a temporary PM workspace seeded
+from the core lock. Packages are installed as wheels so the output remains valid
+after the workspace is removed. The combined lock is saved as `/output/uv.lock`;
+the source project and its lock remain unchanged.
 
 `pm.stage_manager_runtime(...)` is the bootstrap exception. It stages PM's own
 locked runtime through the direct private engine because that runtime cannot

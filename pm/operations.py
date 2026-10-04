@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import tempfile
 import uuid
 
 from pm.package import InstallError
@@ -29,13 +30,14 @@ def build_environment(
     *, source: Path, out: Path, python: Path | None = None,
     cache: Path | None = None, env: Mapping[str, str] | None = None,
     extras: Sequence[str] = (), groups: Sequence[str] = (),
+    plugins: Sequence[Path] = (),
     all_extras: bool = False, no_install_project: bool = False,
     frozen: bool = True, sealed: bool = False, offline: bool = False,
     explicit: bool = False, timeout: int = 1800,
 ) -> Path:
     """Build and validate a fresh destination; never overwrite an existing tree.
 
-    A build has no profile/plugin discovery or application selection side effects.
+    Plugins are explicit build inputs; no profile discovery or selection is performed.
     Failure removes only the destination exclusively created by this invocation.
     Sealed builds prune only the .pth files that refer to build-time state.
     """
@@ -60,8 +62,24 @@ def build_environment(
         offline=offline, explicit=explicit, output=sys.stderr,
     )
     with _fresh_build(environment, sealed=sealed):
-        environment.sync(source, extras=extras, groups=groups, all_extras=all_extras,
-                         no_install_project=no_install_project, frozen=frozen, timeout=timeout)
+        if plugins:
+            from pm.workspace import _generate_pyproject
+
+            with tempfile.TemporaryDirectory(prefix="pm-build-plugins-") as temporary:
+                workspace = Path(temporary) / "workspace"
+                _generate_pyproject([Path(path) for path in plugins], workspace, source=source)
+                seed = source / "uv.lock"
+                if seed.is_file():
+                    shutil.copy2(seed, workspace / "uv.lock")
+                # A build snapshot is temporary: install wheels, never editables
+                # whose .pth entries would point at the deleted workspace.
+                environment.sync(workspace, extras=extras, groups=groups, all_extras=all_extras,
+                                 no_install_project=no_install_project, frozen=False,
+                                 no_editable=True, timeout=timeout)
+                shutil.copy2(workspace / "uv.lock", out / "uv.lock")
+        else:
+            environment.sync(source, extras=extras, groups=groups, all_extras=all_extras,
+                             no_install_project=no_install_project, frozen=frozen, timeout=timeout)
     return environment.executable
 
 
