@@ -296,6 +296,14 @@ RUN /opt/hermes/.venv/bin/python -c 'from pathlib import Path; from pm.features 
 # into runtime so the bootstrap venv does not add a second dependency layer.
 FROM python_deps AS plugin_deps
 COPY --link --chmod=a+rX,go-w . .
+# CI's source stamp replaces the base-stage stamp. Bind the already staged
+# manager before invoking PM; the final runtime source copy binds it again.
+RUN set -eu; \
+    if [ ! -f /opt/hermes/install-stamp.json ]; then \
+        printf '{"schemaVersion":2,"commit":"0000000000000000000000000000000000000000","distribution":"docker","source":"fallback","updateMechanism":"external"}\n' \
+            > /opt/hermes/install-stamp.json; \
+    fi; \
+    python3 -c 'import json; from pathlib import Path; path = Path("/opt/hermes/install-stamp.json"); stamp = json.loads(path.read_text()); stamp["pmRuntime"] = "/opt/hermes/pm-runtime"; path.write_text(json.dumps(stamp) + "\n")'
 
 # Stage the standalone provider at its catalog pin, then let PM build one
 # core + plugin dependency graph from the plugin's own declaration.
