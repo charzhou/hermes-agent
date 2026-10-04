@@ -287,8 +287,8 @@ RUN set -eu; \
     fi
 # Keep the immutable payload's feature contract beside its manifest.  A fork
 # image may replace a persistent data volume that still contains a partial PM
-# generation; the launcher uses this inventory with HERMES_DISABLE_LAZY_INSTALLS
-# to keep the sealed venv authoritative instead of hiding baked adapters behind
+# generation; the launcher uses this inventory to keep the sealed venv
+# authoritative instead of hiding baked adapters behind
 # that stale generation.
 RUN /opt/hermes/.venv/bin/python -c 'from pathlib import Path; from pm.features import installed_extras, write_features; root=Path("/opt/hermes"); write_features(installed_extras(root, root / ".venv", python_exe=root / ".venv/bin/python"), root)'
 
@@ -420,6 +420,7 @@ RUN mkdir -p /opt/hermes/bin && \
 # the stage2 hook uses the marker to avoid replacing that sealed environment
 # with a writable PM generation on the data volume.
 ARG HERMES_FORK_ALL_EXTRAS
+ARG HERMES_DISABLE_LAZY_INSTALLS
 ARG HERMES_IMAGE_NAME=hermes-agent
 RUN set -eu; \
     if [ ! -f /opt/hermes/install-stamp.json ]; then \
@@ -475,11 +476,10 @@ ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
 ENV HERMES_HOME=/opt/data
 ENV HERMES_WRITE_SAFE_ROOT=/opt/data
-ENV HERMES_DISABLE_LAZY_INSTALLS=${HERMES_FORK_ALL_EXTRAS}
-# Fork full-extra images set this to 1. Their provenance marker also tells
-# stage2 to keep the sealed /opt/hermes/.venv authoritative and skip PM
-# generation refreshes. Official images leave this unset and retain their
-# existing opt-in lazy-extra behavior.
+ENV HERMES_DISABLE_LAZY_INSTALLS=${HERMES_DISABLE_LAZY_INSTALLS}
+# The fork build sets this bridge to 0. Lazy installation therefore follows
+# security.allow_lazy_installs (true by default), while the provenance marker
+# still makes the sealed /opt/hermes/.venv authoritative during stage2.
 
 # Xfce, dbus and the display-allocation lock need one; containers have no logind
 # to create /run/user/<uid>. The default fallback ($HOME/.cache) is the /opt/data

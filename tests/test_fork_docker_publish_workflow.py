@@ -177,6 +177,7 @@ def test_build_is_credential_free_and_saves_the_tested_image() -> None:
     assert "HERMES_GIT_SHA=${{ github.sha }}" in config["build-args"]
     assert "HERMES_IMAGE_NAME=${{ steps.image.outputs.image_name }}" in config["build-args"]
     assert "HERMES_FORK_ALL_EXTRAS=1" in config["build-args"]
+    assert "HERMES_DISABLE_LAZY_INSTALLS=0" in config["build-args"]
     assert "org.opencontainers.image.revision=${{ github.sha }}" in config["labels"]
     assert "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" in config["labels"]
     assert config["cache-from"] == "${{ matrix.cache-from }}"
@@ -316,7 +317,8 @@ def test_fork_docker_mode_bakes_extras_and_skips_runtime_refresh() -> None:
     assert "ARG HERMES_IMAGE_NAME=hermes-agent" in dockerfile
     assert "--no-install-project --sealed" in dockerfile
     assert 'excluded={"kittentts", "termux", "termux-all"}' in dockerfile
-    assert "ENV HERMES_DISABLE_LAZY_INSTALLS=${HERMES_FORK_ALL_EXTRAS}" in dockerfile
+    assert "ARG HERMES_DISABLE_LAZY_INSTALLS" in dockerfile
+    assert "ENV HERMES_DISABLE_LAZY_INSTALLS=${HERMES_DISABLE_LAZY_INSTALLS}" in dockerfile
     assert "installed_extras(root, root / \".venv\"" in dockerfile
     assert "write_features(" in dockerfile
     assert '"dependency_policy": "sealed"' in dockerfile

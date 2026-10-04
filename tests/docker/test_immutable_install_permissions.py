@@ -9,10 +9,11 @@ def test_container_sets_hosted_write_policy_env(built_image: str) -> None:
     script = (
         'test "$HERMES_HOME" = "/opt/data" && '
         'test "$HERMES_WRITE_SAFE_ROOT" = "/opt/data" && '
-        # Official images leave lazy installs enabled for opt-in extras;
-        # fork full-extra images set this to 1 after sealing their extras.
+        # Official images leave the bridge unset; fork full-extra images set it
+        # to 0 so the user-facing security.allow_lazy_installs setting remains
+        # effective after sealing their baked extras.
         '(test -z "${HERMES_DISABLE_LAZY_INSTALLS:-}" || '
-        'test "$HERMES_DISABLE_LAZY_INSTALLS" = "1") && '
+        'test "$HERMES_DISABLE_LAZY_INSTALLS" = "0") && '
         'test "$PYTHONDONTWRITEBYTECODE" = "1"'
     )
     result = subprocess.run(

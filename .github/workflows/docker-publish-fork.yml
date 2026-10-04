@@ -87,6 +87,7 @@ jobs:
             HERMES_GIT_SHA=${{ github.sha }}
             HERMES_IMAGE_NAME=${{ steps.image.outputs.image_name }}
             HERMES_FORK_ALL_EXTRAS=1
+            HERMES_DISABLE_LAZY_INSTALLS=0
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ matrix.cache-to }}
 
