@@ -1564,7 +1564,10 @@ def _truncate_content(
     previews (subdirectory hints) whose fixed cap no config key or model raises: the truncation is logged
     with the marker as the only disclosure, never queued for the chat status line."""
     if max_chars is None:
-        max_chars = _get_context_file_max_chars(context_length, allow_below_default=allow_below_default)
+        max_chars = (
+            _get_context_file_max_chars(context_length, allow_below_default=True)
+            if allow_below_default else _get_context_file_max_chars(context_length)
+        )
     if len(content) <= max_chars:
         return content
     remedy = (
