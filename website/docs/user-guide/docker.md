@@ -41,6 +41,14 @@ bundled plugin requires rebuilding the image with an updated catalog pin.
 
 ## Quick start
 
+When the container starts both services, the dashboard waits for the supervised
+gateway to finish initialization before launching. This reduces concurrent
+session-database initialization. A stopped gateway skips the wait; a failed
+startup or timeout leaves the dashboard available for management.
+`dashboard.gateway_startup_wait_seconds` in `config.yaml` controls the maximum
+wait (90 seconds by default, 0 disables it). This orders startup only; ongoing
+database transactions still require suitable storage and prompt lock release.
+
 If this is your first time running Hermes Agent, create a data directory on the host and start the container interactively to run the setup wizard:
 
 :::caution Avoid browser-based VPS consoles for the install commands

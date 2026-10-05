@@ -2183,6 +2183,11 @@ updates:
 # =============================================================================
 # Web Dashboard
 # =============================================================================
+# Docker concurrent startup: wait for the supervised gateway to initialize
+# before launching the dashboard (0 disables, default 90 seconds).
+# dashboard:
+#   gateway_startup_wait_seconds: 90
+#
 # OAuth gate configuration for `hermes dashboard --host <non-loopback>`.
 # The bundled Nous Portal plugin reads these on startup; settings here are
 # the canonical surface. Each can be overridden by an environment variable:

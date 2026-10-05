@@ -49,6 +49,12 @@ case "${HERMES_DASHBOARD_INSECURE:-}" in
 esac
 
 # Skip the drop when already non-root.
+# Probe the supervised gateway before the dashboard CLI can open state.db.
+if [ "$(id -u)" = 0 ]; then
+    s6-setuidgid hermes /opt/hermes/.venv/bin/python -m hermes_cli.container_dashboard_startup
+else
+    /opt/hermes/.venv/bin/python -m hermes_cli.container_dashboard_startup
+fi
 [ "$(id -u)" = 0 ] || exec hermes dashboard --host "$dash_host" --port "$dash_port" --no-open
 exec s6-setuidgid hermes hermes dashboard \
     --host "$dash_host" --port "$dash_port" --no-open

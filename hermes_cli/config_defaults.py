@@ -999,10 +999,10 @@ DEFAULT_CONFIG = {
     },
 
     "dashboard": {
+        "gateway_startup_wait_seconds": 90,  # Docker: wait before opening state.db; 0 disables.
         # Visual theme: "default" | "midnight" | "ember" | "mono" | "cyberpunk" | "rose"
         "theme": "default",
-        # Process-isolation rollout controls. Read via the raw config loader, so tui_gateway.server
-        # also owns explicit defaults.
+        # Raw-config readers in tui_gateway.server also own these process-isolation defaults.
         "turn_isolation": False,
         "compute_host_heartbeat_secs": 15,
         "compute_host_respawn_max": 3,
