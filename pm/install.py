@@ -647,6 +647,9 @@ def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candi
     from pm.packages import Venv
 
     root = paths.repo_root() if project_root is None else Path(project_root).absolute()
+    sealed_plugin_state = _sealed_plugin_state(plugins, root)
+    if sealed_plugin_state is not None:
+        return sealed_plugin_state
     package = get_package("venv") if project_root is None else Venv(root)
     fact = Facts(runtime_facts_path(root), strict=True).get("venv")
     if fact is None:
@@ -660,6 +663,44 @@ def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candi
     enabled = sorted(set(_still_declared(package, fact["extras"])) | set(extras or []))
     stamp = package.expected_stamp(enabled, **_member_inputs(plugins))
     return _runtime_state_matches(fact, stamp, project_root=root)
+
+
+def _sealed_plugin_state(plugins: Members | Candidates | None, root: Path) -> bool | None:
+    """Check bundled plugin requirements against a sealed payload's app venv.
+
+    Docker/Nix payloads intentionally have no writable PM ``venv`` fact. Their
+    dependency environment is the shipped interpreter, so a dashboard probe
+    must inspect that environment rather than treating the missing mutable fact
+    as an installation gap. User plugin trees stay on the normal PM path.
+    """
+    if not sealed() or not isinstance(plugins, Candidates):
+        return None
+    from importlib.metadata import distributions
+    from packaging.requirements import Requirement
+    from pm.environments import selected_venv, site_packages
+    from pm.plugin_declarations import read_python_declaration
+
+    bundled_root = (root / "plugins").resolve()
+    environment = selected_venv(root)
+    site = site_packages(environment)
+    installed = {
+        distribution.metadata["Name"].lower().replace("-", "_"): distribution.version
+        for distribution in distributions(path=[str(site)])
+        if distribution.metadata.get("Name")
+    }
+    for candidate in plugins.dirs:
+        plugin_dir = Path(candidate).resolve()
+        if not plugin_dir.is_relative_to(bundled_root):
+            return False
+        declaration = read_python_declaration(plugin_dir)
+        for raw in declaration.install_requirements:
+            requirement = Requirement(raw)
+            if requirement.marker and not requirement.marker.evaluate():
+                continue
+            version = installed.get(requirement.name.lower().replace("-", "_"))
+            if version is None or not requirement.specifier.contains(version, prereleases=True):
+                return False
+    return True
 
 
 def _feature_policy(extras: Optional[list[str]], *, repair: bool) -> tuple[list[str] | None, list[str] | None]:
