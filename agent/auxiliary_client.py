@@ -1128,38 +1128,6 @@ def _scoped_key_env(name: str) -> str:
         return (os.getenv(name) or "").strip()
 
 
-# Codex Responses → chat.completions adapter, so aux consumers need no changes.
-def _parse_codex_final_response(final: Any) -> Tuple[List[str], List[Any], Any]:
-    """Split a completed Responses object into (text_parts, tool_calls, usage) in chat.completions shape."""
-    text_parts: List[str] = []
-    tool_calls_raw: List[Any] = []
-    for item in (getattr(final, "output", None) or []):
-        item_type = _field(item, "type")
-        if item_type == "message":
-            for part in (_field(item, "content") or []):
-                part_type = _field(part, "type")
-                if part_type in {"output_text", "text"}:
-                    text_parts.append(_field(part, "text", ""))
-                elif part_type == "refusal":
-                    # A refusal part carries the model's explanation; dropping it turns a
-                    # refusal-only turn into an empty response that gets retried.
-                    text_parts.append(_field(part, "refusal", ""))
-        elif item_type == "function_call":
-            tool_calls_raw.append(SimpleNamespace(
-                id=_field(item, "call_id", ""), type="function",
-                function=SimpleNamespace(
-                    name=_field(item, "name", ""), arguments=_field(item, "arguments", "{}"))))
-    usage = None
-    resp_usage = getattr(final, "usage", None)
-    if resp_usage:
-        def _u(key: str) -> int:
-            return getattr(resp_usage, key, 0) or (resp_usage.get(key, 0) if isinstance(resp_usage, dict) else 0)
-        usage = SimpleNamespace(
-            prompt_tokens=_u("input_tokens"), completion_tokens=_u("output_tokens"),
-            total_tokens=_u("total_tokens"))
-    return text_parts, tool_calls_raw, usage
-
-
 def _attempt_stream_socket(stream: Any) -> Any:
     """The raw socket under an SDK event stream (``stream.response`` is the ``httpx.Response``;
     httpcore publishes its connection as the ``network_stream`` extension), or None."""
@@ -1502,9 +1470,10 @@ class _CodexCompletionsAdapter:
         # instead of agent/transports/codex.py's build_kwargs, so they need the same guard applied
         # independently. See #32716.
         # Aux requests run their own model; stamp/filter reasoning provenance against it, not the main agent's.
+        issuer_kind = _classify_responses_issuer(base_url=host, **route._asdict())
         input_items = _chat_messages_to_responses_input(
             replay_messages, is_github_responses=is_copilot,
-            current_issuer_kind=_classify_responses_issuer(base_url=host, **route._asdict()),
+            current_issuer_kind=issuer_kind,
             current_issuer_model=wire_model, native_compaction_eligible=False,
         )
         resp_kwargs: Dict[str, Any] = {
@@ -1548,6 +1517,8 @@ class _CodexCompletionsAdapter:
             resp_kwargs["tools"] = wire_tools
         if wire_aliases:
             resp_kwargs["_wire_aliases"] = wire_aliases
+        # Response normalization is route-sensitive too (popped in ``create()``, never sent).
+        resp_kwargs["_issuer_kind"] = issuer_kind
         # Stable prompt-cache routing: key is content-addressed from the static prefix
         # (instructions + tool schemas) so it survives across turns, scoped by the owning
         # conversation (rotation-stable logical scope, else the physical session id). Skip the
@@ -1591,6 +1562,8 @@ class _CodexCompletionsAdapter:
         # ``response.completed.response.output``, which Codex returns as ``null`` (SDK crash).
         resp_kwargs, model, timeout = self._build_responses_kwargs(kwargs)
         wire_aliases = resp_kwargs.pop("_wire_aliases", None) or {}
+        issuer_kind = resp_kwargs.pop("_issuer_kind", None)
+        issuer_model = str(resp_kwargs.get("model") or model)
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
         guard = _CodexStreamGuard(self._client, total_timeout, no_progress_timeout=kwargs.get("no_progress_timeout"))
         try:
@@ -1612,13 +1585,17 @@ class _CodexCompletionsAdapter:
                     final = event_stream
                 else:
                     final = _consume_codex_event_stream(
-                        event_stream, model=str(resp_kwargs.get("model") or model), on_event=guard.on_event
+                        event_stream, model=issuer_model, on_event=guard.on_event
                     )
             finally:
                 guard.release_stream(event_stream)
             if final is None:
                 raise RuntimeError("Codex auxiliary Responses stream did not return a final response")
-            text_parts, tool_calls_raw, usage = _parse_codex_final_response(final)
+            from agent.auxiliary_codex_response import _parse_codex_final_response
+
+            text_parts, tool_calls_raw, usage, finish_reason = _parse_codex_final_response(
+                final, issuer_kind=issuer_kind, issuer_model=issuer_model,
+            )
             # Undo only the aliases THIS request emitted, before the call reaches Hermes dispatch.
             for tc in tool_calls_raw or ():
                 if tc.function.name in wire_aliases:
@@ -1635,9 +1612,7 @@ class _CodexCompletionsAdapter:
             role="assistant", content="".join(text_parts).strip() or None,
             tool_calls=tool_calls_raw or None,
         )
-        choice = SimpleNamespace(
-            index=0, message=message, finish_reason="stop" if not tool_calls_raw else "tool_calls"
-        )
+        choice = SimpleNamespace(index=0, message=message, finish_reason=finish_reason)
         return SimpleNamespace(choices=[choice], model=model, usage=usage)
 
 
@@ -2584,8 +2559,8 @@ def _relay_aux_call_scope(args: tuple, kwargs: dict):
     })
     try:
         yield
-    except BaseException:
-        _fail_relay_auxiliary_call()
+    except BaseException as exc:
+        _fail_relay_auxiliary_call(exc)
         raise
     finally:
         _RELAY_AUX_CALL_CONTEXT.reset(token)
@@ -2666,15 +2641,19 @@ def _relay_sync_completion(
     from agent import relay_llm
     from agent.auxiliary_hooks import run_with_aux_hooks
     model_name = str(kwargs.get("model") or fallback_model)
-    return run_with_aux_hooks(
-        lambda: relay_llm.execute_current(
-            kwargs, lambda request: _run_protected_sync_provider_call(callback, request),
-            name=provider_name, model_name=model_name, metadata=metadata,
-            defer_logical_completion=True,
-        ),
-        aux_task=str(metadata.get("auxiliary_task") or ""), metadata=metadata, client=client, kwargs=kwargs,
-        provider=provider_name, model=model_name, api_mode=str(metadata.get("api_mode") or ""),
-    )
+    try:
+        return run_with_aux_hooks(
+            lambda: relay_llm.execute_current(
+                kwargs, lambda request: _run_protected_sync_provider_call(callback, request),
+                name=provider_name, model_name=model_name, metadata=metadata,
+                defer_logical_completion=True,
+            ),
+            aux_task=str(metadata.get("auxiliary_task") or ""), metadata=metadata, client=client, kwargs=kwargs,
+            provider=provider_name, model=model_name, api_mode=str(metadata.get("api_mode") or ""),
+        )
+    except Exception as exc:
+        _note_relay_auxiliary_error(exc)
+        raise
 
 
 async def _relay_async_completion(
@@ -2693,14 +2672,18 @@ async def _relay_async_completion(
     from agent import relay_llm
     from agent.auxiliary_hooks import arun_with_aux_hooks
     model_name = str(kwargs.get("model") or fallback_model)
-    return await arun_with_aux_hooks(
-        lambda: relay_llm.execute_current_async(
-            kwargs, callback, name=provider_name, model_name=model_name,
-            metadata=metadata, defer_logical_completion=True,
-        ),
-        aux_task=str(metadata.get("auxiliary_task") or ""), metadata=metadata, client=client, kwargs=kwargs,
-        provider=provider_name, model=model_name, api_mode=str(metadata.get("api_mode") or ""),
-    )
+    try:
+        return await arun_with_aux_hooks(
+            lambda: relay_llm.execute_current_async(
+                kwargs, callback, name=provider_name, model_name=model_name,
+                metadata=metadata, defer_logical_completion=True,
+            ),
+            aux_task=str(metadata.get("auxiliary_task") or ""), metadata=metadata, client=client, kwargs=kwargs,
+            provider=provider_name, model=model_name, api_mode=str(metadata.get("api_mode") or ""),
+        )
+    except Exception as exc:
+        _note_relay_auxiliary_error(exc)
+        raise
 
 
 def _relay_sync_stream(
@@ -6877,17 +6860,26 @@ def _validate_llm_response(
     except (AttributeError, TypeError, IndexError) as exc:
         recovered = _recover_aux_response_message(response)
         if recovered is None:
-            raise RuntimeError(
+            invalid = RuntimeError(
                 f"Auxiliary {task or 'call'}: LLM returned invalid response (type={type(response).__name__}): "
                 f"{str(response)[:120]!r}. Expected object with .choices[0].message — check provider "
                 f"adapter or custom endpoint compatibility."
-            ) from exc
+            )
+            # An HTTP-200 body carrying a provider ``error`` (aggregators relay upstream failures
+            # this way): keep it for the classifier without changing how the ladder routes this.
+            from agent import auxiliary_call_outcome
+            setattr(invalid, auxiliary_call_outcome.PROVIDER_ERROR_ATTR,
+                    auxiliary_call_outcome.embedded_provider_error(response))
+            _note_relay_auxiliary_error(invalid)
+            raise invalid from exc
         response = recovered
     from agent.transports.chat_completions import is_router_timeout_shim
     if is_router_timeout_shim(response):
         # HTTP-200 router failure shim (#68396): invalid like a malformed shape so the
         # auxiliary fallback chain moves to the next candidate instead of titling with it.
-        raise RuntimeError(f"Auxiliary {task or 'call'}: provider returned a timeout shim instead of a completion")
+        shim = RuntimeError(f"Auxiliary {task or 'call'}: provider returned a timeout shim instead of a completion")
+        _note_relay_auxiliary_error(shim)
+        raise shim
     # Retain the provider-reported model for terminal relay route attribution.
     context = _RELAY_AUX_CALL_CONTEXT.get()
     if context is not None:
@@ -6898,8 +6890,9 @@ def _validate_llm_response(
     return response
 
 
-def _complete_relay_auxiliary_call(*, outcome: str = "success") -> None:
-    """Close one auxiliary logical call after acceptance or terminal failure."""
+def _complete_relay_auxiliary_call(*, outcome: str = "success", error_class: Optional[str] = None) -> None:
+    """Close one auxiliary logical call after acceptance or terminal failure. A success
+    reports the last attempt error it recovered from (``none`` when the first attempt held)."""
     context = _RELAY_AUX_CALL_CONTEXT.get()
     if context is None:
         return
@@ -6909,12 +6902,28 @@ def _complete_relay_auxiliary_call(*, outcome: str = "success") -> None:
         model_name=str(context.get("model") or "unknown"),
         provider_name=str(context.get("provider") or "auxiliary"),
         response_model_name=context.get("response_model"),
+        error_class=error_class or context.get("error_class") or "none",
     )
 
 
-def _fail_relay_auxiliary_call() -> None:
-    """Close a terminally failed call without replacing its original error."""
+def _note_relay_auxiliary_error(exc: BaseException) -> None:
+    """Remember one failed attempt's classified reason on the logical call."""
+    context = _RELAY_AUX_CALL_CONTEXT.get()
+    if context is not None and isinstance(exc, Exception):
+        from agent import auxiliary_call_outcome
+        context["error_class"] = auxiliary_call_outcome.error_class(
+            exc, provider=str(context.get("provider") or ""), model=str(context.get("model") or ""))
+
+
+def _fail_relay_auxiliary_call(exc: BaseException) -> None:
+    """Close a call that ended in ``exc`` without replacing it: a Hermes abort is ``cancelled``,
+    anything else ``failed`` with the classifier's reason for the error that ended it."""
     try:
+        from agent import auxiliary_call_outcome
+        if auxiliary_call_outcome.is_cancellation(exc):
+            _complete_relay_auxiliary_call(outcome="cancelled", error_class="none")
+            return
+        _note_relay_auxiliary_error(exc)
         _complete_relay_auxiliary_call(outcome="failed")
     except Exception:
         logger.warning("Relay auxiliary failure finalization failed", exc_info=True)
