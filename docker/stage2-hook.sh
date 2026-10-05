@@ -652,11 +652,14 @@ fi
 # any supervised service boots onto a generation built for the previous image.
 #
 # Fork images seal every Linux-compatible optional extra into /opt/hermes/.venv
-# during the build. Their provenance marker makes that payload authoritative;
-# refreshing a writable generation would be both unnecessary and a source of
-# first-boot network latency. Official images keep the refresh path below.
+# during the build. When lazy installs are disabled, that payload is
+# authoritative and no writable generation is needed. The fork image currently
+# keeps lazy installs enabled so users can add plugin dependencies; in that
+# mode an older writable generation must be refreshed against this image's
+# uv.lock before any supervised service starts.
 if /usr/bin/python3 -c '
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -664,9 +667,12 @@ try:
     marker = json.loads(Path("/etc/hermes/image-provenance.json").read_text(encoding="utf-8"))
 except (OSError, ValueError, TypeError):
     sys.exit(1)
-sys.exit(0 if marker.get("dependency_policy") == "sealed" else 1)
+lazy_disabled = os.environ.get("HERMES_DISABLE_LAZY_INSTALLS", "").strip().lower() in {
+    "1", "true", "yes",
+}
+sys.exit(0 if marker.get("dependency_policy") == "sealed" and lazy_disabled else 1)
 '; then
-    echo "[stage2] sealed dependency image: using baked environment; skipping PM refresh"
+    echo "[stage2] sealed dependency image with lazy installs disabled: using baked environment"
 else
     # On failure (e.g. offline) PM falls back to the image's own environment
     # and keeps the extras recorded for the next boot or install. Then collect

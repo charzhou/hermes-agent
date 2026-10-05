@@ -1020,8 +1020,10 @@ Already installed dependencies remain usable. Explicit PM install commands
 are separate from on-demand installation. A bundle's frozen feature list,
 when present with lazy installs disabled, restricts requested Python extra
 names. This setting is not a blanket ban on explicit plugin admission or
-manual package-manager commands. The official Docker image also disables
-on-demand installs through its internal environment policy.
+manual package-manager commands. Some hermetic or test images disable
+on-demand installs through an internal environment policy; the fork image
+keeps on-demand installs enabled for user plugins and refreshes its writable
+dependency generation at boot.
 
 For missing dependencies, use `hermes tools` and `hermes doctor` to identify
 the requirement. Do not run pip against a signed payload or the system Python.

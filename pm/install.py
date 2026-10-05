@@ -206,6 +206,36 @@ def sealed() -> bool:
     return (paths.store_root().parent / "manifest.json").is_file()
 
 
+def _bundled_payload_fallback(fact: object) -> bool:
+    """Whether a sealed Docker payload is serving while its overlay is pending.
+
+    ``refresh_dependencies`` records the desired extras/plugin set without an
+    ``environment`` when a writable overlay cannot be rebuilt.  Only Docker's
+    sealed provenance marker may make that state a healthy baked-payload
+    fallback; other sealed bundle formats must continue reporting drift.
+    """
+    if not sealed() or not isinstance(fact, dict) or "environment" in fact:
+        return False
+    try:
+        marker = json.loads(Path("/etc/hermes/image-provenance.json").read_text(encoding="utf-8"))
+        from pm.environments import payload_venv, selected_venv, site_packages
+
+        payload = payload_venv(paths.repo_root())
+        if (payload is None
+                or selected_venv(paths.repo_root()).resolve() != payload.resolve()
+                or not (payload / "pyvenv.cfg").is_file()
+                or not site_packages(payload).is_dir()):
+            return False
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+        return False
+    return (isinstance(marker, dict)
+            and type(marker.get("schema")) is int
+            and marker.get("schema") == 1
+            and marker.get("deployment_kind") == "image"
+            and marker.get("manager") == "docker"
+            and marker.get("dependency_policy") == "sealed")
+
+
 def _refuse_lazy(name: str, what: str) -> InstallError:
     from pm import receipt
 
@@ -906,6 +936,7 @@ def drift(*, include_venv: bool = True) -> dict[str, str]:
     problems: dict[str, str] = {}
     lockfile = _lockfile()
     facts = _facts()
+    runtime_facts = Facts(paths.runtime_facts_path()) if paths.runtime_facts_path().is_file() else None
     store = _store()
     target = current_target()
     for name in lockfile.names():
@@ -923,7 +954,17 @@ def drift(*, include_venv: bool = True) -> dict[str, str]:
         venv = get_package("venv")
     except KeyError:
         venv = None
-    if include_venv and venv is not None and (paths.runtime_facts_path().is_file() or facts.get("venv") is not None):
+    venv_fact = (runtime_facts.get("venv") if runtime_facts is not None else None) or facts.get("venv")
+    # A sealed image can retain the desired extras/plugin selection when a
+    # writable overlay refresh fails (for example while the registry is
+    # offline).  ``record_state`` deliberately clears ``environment`` in that
+    # fallback, so the bundled payload remains selected.  Keep the stale stamp
+    # for the next refresh attempt without reporting the baked payload as
+    # broken on every CLI and gateway startup.
+    bundled_fallback = _bundled_payload_fallback(venv_fact)
+    if (include_venv and venv is not None
+            and (paths.runtime_facts_path().is_file() or venv_fact is not None)
+            and not bundled_fallback):
         try:
             if not venv_is_current():
                 problems["venv"] = "out of sync with uv.lock"

@@ -71,6 +71,7 @@ def refresh_dependencies(project_root: Path) -> str:
     from hermes_cli.runtime_state import runtime_lock
     from pm.client import sync_venv
     from pm.environments import runtime_facts_path
+    from pm.features import read_features
     from pm.install import venv_is_current
     from pm.lock import Facts
     from pm.paths import repo_root
@@ -84,7 +85,11 @@ def refresh_dependencies(project_root: Path) -> str:
         return "current"
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            sync_venv(explicit=True)
+            # The image's sealed feature inventory is the baseline for a
+            # writable overlay.  A recorded selection from the previous image
+            # may omit extras that are baked into the new image, so include the
+            # current inventory while retaining any user-added extras/plugins.
+            sync_venv(read_features(), explicit=True)
         return "rebuilt"
     except Exception as exc:
         print(f"dependency refresh failed: {exc}", file=sys.stderr)

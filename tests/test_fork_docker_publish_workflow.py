@@ -310,7 +310,7 @@ def test_no_internal_variants_or_specs_are_restored() -> None:
     assert not (REPO_ROOT / ".github" / "actions" / "hermes-aio-smoke-test").exists()
 
 
-def test_fork_docker_mode_bakes_extras_and_skips_runtime_refresh() -> None:
+def test_fork_docker_mode_bakes_extras_and_refreshes_lazy_runtime() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     stage2 = (REPO_ROOT / "docker" / "stage2-hook.sh").read_text(encoding="utf-8")
     assert "ARG HERMES_FORK_ALL_EXTRAS" in dockerfile
@@ -324,5 +324,6 @@ def test_fork_docker_mode_bakes_extras_and_skips_runtime_refresh() -> None:
     assert '"dependency_policy": "sealed"' in dockerfile
     assert "HERMES_IMAGE_NAME" in dockerfile
     assert "libportaudio2" in dockerfile
-    assert 'marker.get("dependency_policy") == "sealed"' in stage2
-    assert "skipping PM refresh" in stage2
+    assert 'marker.get("dependency_policy") == "sealed" and lazy_disabled' in stage2
+    assert 'HERMES_DISABLE_LAZY_INSTALLS' in stage2
+    assert "using baked environment" in stage2

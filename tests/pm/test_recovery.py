@@ -78,6 +78,48 @@ def recovery_graph(tmp_path):
     return core, plugin
 
 
+def test_refresh_dependencies_replays_current_shipped_features(tmp_path, monkeypatch):
+    from pm import paths
+    from pm import recovery
+    from pm.lock import Facts
+
+    core = tmp_path / "core"
+    core.mkdir()
+    monkeypatch.setattr(paths, "repo_root", lambda: core)
+    facts_path = paths.runtime_facts_path()
+    facts_path.parent.mkdir(parents=True, exist_ok=True)
+    Facts(facts_path).record_state("venv", "old", ["messaging"], environment=tmp_path / "old")
+    monkeypatch.setattr("pm.install.venv_is_current", lambda **kwargs: False)
+    monkeypatch.setattr("pm.features.read_features", lambda: ["all", "messaging"])
+    calls = []
+
+    def sync(extras=None, **kwargs):
+        calls.append((extras, kwargs))
+
+    monkeypatch.setattr("pm.client.sync_venv", sync)
+
+    assert recovery.refresh_dependencies(core) == "rebuilt"
+    assert calls == [(["all", "messaging"], {"explicit": True})]
+
+
+def test_sealed_payload_fallback_keeps_stale_overlay_out_of_startup_drift(tmp_path, monkeypatch):
+    """A failed sealed-image overlay refresh keeps retry state without a false alarm."""
+    from pm import install, paths
+    from pm.lock import Facts
+
+    core = tmp_path / "core"
+    core.mkdir()
+    monkeypatch.setattr(paths, "repo_root", lambda: core)
+    facts_path = paths.runtime_facts_path()
+    facts_path.parent.mkdir(parents=True, exist_ok=True)
+    Facts(facts_path).record_state("venv", "stale", ["chosen"])
+    monkeypatch.setattr(install, "_bundled_payload_fallback", lambda fact: True)
+    monkeypatch.setattr(install, "venv_is_current", lambda **kwargs: pytest.fail("fallback must remain retryable"))
+
+    assert "venv" not in install.drift()
+    assert Facts(facts_path).get("venv") == {"stamp": "stale", "extras": ["chosen"]}
+
+
 @pytest.mark.parametrize("failure", [None, "missing_lock", "corrupt_facts", "empty_environment", "missing_extras", "validation", "publication"])
 def test_repair_restores_recorded_plugin_dependencies_without_config(tmp_path, monkeypatch, recovery_graph, failure):
     import pm.paths as paths

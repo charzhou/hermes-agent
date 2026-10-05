@@ -447,9 +447,10 @@ RUN mkdir -p /opt/hermes/bin && \
 # to null.
 # These args are intentionally declared in the runtime stage so the marker
 # records the actual fork image and its dependency policy. The fork workflow
-# passes HERMES_FORK_ALL_EXTRAS=1 after sealing every Linux-compatible extra;
-# the stage2 hook uses the marker to avoid replacing that sealed environment
-# with a writable PM generation on the data volume.
+# passes HERMES_FORK_ALL_EXTRAS=1 after sealing every Linux-compatible extra.
+# The stage2 hook skips writable-generation refresh only when lazy installs are
+# disabled; the fork image passes HERMES_DISABLE_LAZY_INSTALLS=0 so stale data
+# volumes are re-resolved while user plugin installs remain available.
 ARG HERMES_FORK_ALL_EXTRAS
 ARG HERMES_DISABLE_LAZY_INSTALLS
 ARG HERMES_IMAGE_NAME=hermes-agent

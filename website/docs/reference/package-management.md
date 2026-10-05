@@ -182,7 +182,9 @@ a bundle's frozen feature list still restricts requested Python extra names
 when lazy installs are disabled. Explicit plugin admission is a separate
 operation, not an on-demand feature request. Do not treat this setting as a
 sandbox or a blanket prohibition on manual package installation.
-Docker additionally sets the internal lazy-install disable flag in the image.
+Docker images keep the baked core environment immutable. Fork images leave
+on-demand installs enabled for user plugins; image startup refreshes any
+recorded writable generation against the image lock before services start.
 
 PM is a dependency manager, not a sandbox for plugin code. Installing a plugin
 requires trust in that plugin and its dependencies.
