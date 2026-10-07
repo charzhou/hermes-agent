@@ -281,7 +281,7 @@ class FeishuMentionMixin:
         try:
             if not path.exists():
                 return
-            with open(path, "r", encoding="utf-8") as handle:
+            with open(path, "r", encoding="utf-8-sig") as handle:
                 self._mention_registry = self._normalize_mention_registry(json.load(handle))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             logger.warning("[Feishu] Failed to load mention registry from %s", path, exc_info=True)
