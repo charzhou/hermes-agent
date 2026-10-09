@@ -1683,7 +1683,8 @@ class TestTopLevelBlockVsAuthoredExtra:
             data = {}
             load_yaml_layer(home, data)
         if block == {"reply_to_mode": "all"}:
-            assert platform not in data.get("platforms", {})
+            assert PlatformConfig.from_dict(data["platforms"][platform]).reply_to_mode == "all"
+            assert data["platforms"][platform]["extra"] == {}
             return
         extra = data["platforms"][platform]["extra"]
         expected = {**block.get("extra", {}), **{k: v for k, v in block.items() if k != "extra"}, **authored}

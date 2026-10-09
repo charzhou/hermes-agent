@@ -156,6 +156,7 @@ describe('useSessionTileDelegate resumeTile', () => {
     expect(requestGatewayForAgent).toHaveBeenCalledWith('source-b', 'default', 'session.resume', {
       session_id: 'stored-shared',
       cols: 96,
+      source: 'desktop',
       omit_messages: true,
       profile: 'default'
     })

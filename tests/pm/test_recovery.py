@@ -122,8 +122,8 @@ def test_sealed_payload_fallback_keeps_stale_overlay_out_of_startup_drift(tmp_pa
 
 @pytest.mark.parametrize("failure", [None, "missing_lock", "corrupt_facts", "empty_environment", "missing_extras", "validation", "publication"])
 def test_repair_restores_recorded_plugin_dependencies_without_config(tmp_path, monkeypatch, recovery_graph, failure):
-    import pm.paths as paths
-    import pm.workspace as workspace
+    from pm import paths
+    from pm import workspace
     from pm.environments import selected_venv, site_packages
 
     engine = importlib.import_module("pm.install")
@@ -202,7 +202,7 @@ def test_repair_restores_recorded_plugin_dependencies_without_config(tmp_path, m
 
 
 def test_uncertain_profile_selection_skips_sync_but_not_admission_or_recorded_repair(tmp_path, monkeypatch, recovery_graph, caplog):
-    import pm.paths as paths
+    from pm import paths
     from hermes_cli.plugins_admission import AdmissionRefused, admit_plugin_set_change
     from pm.environments import install_state_dir, selected_venv, site_packages
 
