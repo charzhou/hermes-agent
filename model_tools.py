@@ -568,8 +568,8 @@ def _uses_small_context_tool_mode(context_length: int) -> bool:
             context_length,
             resolve_minimum_context_length(model_cfg.get("minimum_context_length")),
         )
-    except Exception as exc:
-        logger.debug("Could not resolve small-context tool mode: %s", exc)
+    except OSError as exc:
+        logger.debug("Could not resolve small-context tool mode: %s", exc, exc_info=True)
         return False
 
 

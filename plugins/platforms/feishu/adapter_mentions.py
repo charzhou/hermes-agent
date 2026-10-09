@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import logging
 import re
@@ -40,7 +41,7 @@ def _decode_native_at_token(encoded: str) -> str:
     try:
         padded = encoded + ("=" * (-len(encoded) % 4))
         return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
-    except Exception:
+    except (binascii.Error, UnicodeError):
         return ""
 
 
@@ -178,6 +179,41 @@ def _merge_delivery_mention_targets(
     return merged
 
 
+def _normalize_mention_observations(raw_entry: Any, migration_timestamp: float) -> dict[str, float]:
+    """Migrate legacy targets and retain timestamped observations for conflict detection."""
+    observations: dict[str, float] = {}
+    if isinstance(raw_entry, str):
+        open_id = raw_entry.strip()
+        if open_id:
+            observations[open_id] = migration_timestamp
+    elif isinstance(raw_entry, dict):
+        try:
+            updated_at = float(raw_entry.get("updated_at") or 0.0)
+        except (TypeError, ValueError):
+            updated_at = 0.0
+        entry_timestamp = updated_at if updated_at > 0 else migration_timestamp
+        raw_observations = raw_entry.get("observations")
+        if isinstance(raw_observations, dict):
+            for raw_open_id, raw_seen_at in raw_observations.items():
+                open_id = str(raw_open_id or "").strip()
+                if not open_id:
+                    continue
+                try:
+                    seen_at = float(raw_seen_at or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                observations[open_id] = seen_at if seen_at > 0 else entry_timestamp
+        else:
+            open_id = str(raw_entry.get("open_id") or "").strip()
+            if open_id:
+                observations[open_id] = entry_timestamp
+            for item in raw_entry.get("open_ids", []) or []:
+                candidate = str(item or "").strip()
+                if candidate:
+                    observations[candidate] = entry_timestamp
+    return observations
+
+
 class FeishuMentionMixin:
     """Maintain per-chat observations without treating ambiguous names as identities."""
 
@@ -234,36 +270,7 @@ class FeishuMentionMixin:
                 name = str(raw_name or "").strip()
                 if not name:
                     continue
-                observations: Dict[str, float] = {}
-                if isinstance(raw_entry, str):
-                    open_id = raw_entry.strip()
-                    if open_id:
-                        observations[open_id] = migration_timestamp
-                elif isinstance(raw_entry, dict):
-                    try:
-                        updated_at = float(raw_entry.get("updated_at") or 0.0)
-                    except (TypeError, ValueError):
-                        updated_at = 0.0
-                    entry_timestamp = updated_at if updated_at > 0 else migration_timestamp
-                    raw_observations = raw_entry.get("observations")
-                    if isinstance(raw_observations, dict):
-                        for raw_open_id, raw_seen_at in raw_observations.items():
-                            open_id = str(raw_open_id or "").strip()
-                            if not open_id:
-                                continue
-                            try:
-                                seen_at = float(raw_seen_at or 0.0)
-                            except (TypeError, ValueError):
-                                continue
-                            observations[open_id] = seen_at if seen_at > 0 else entry_timestamp
-                    else:
-                        open_id = str(raw_entry.get("open_id") or "").strip()
-                        if open_id:
-                            observations[open_id] = entry_timestamp
-                        for item in raw_entry.get("open_ids", []) or []:
-                            candidate = str(item or "").strip()
-                            if candidate:
-                                observations[candidate] = entry_timestamp
+                observations = _normalize_mention_observations(raw_entry, migration_timestamp)
                 if observations:
                     targets[name] = {"observations": observations}
             if targets:
