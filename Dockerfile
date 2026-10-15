@@ -278,9 +278,11 @@ RUN set -eu; \
         extra_args="$(python3 -c 'import tomllib; p=tomllib.load(open("pyproject.toml", "rb")); excluded={"kittentts", "termux", "termux-all"}; print(" ".join(f"--extra {name}" for name in sorted(p["project"]["optional-dependencies"]) if name not in excluded))')"; \
         set -- $extra_args; \
         python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
+            --cache /opt/hermes/uv-cache \
             --out /opt/hermes/.venv --no-install-project --sealed --record-selection "$@"; \
     else \
         python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
+            --cache /opt/hermes/uv-cache \
             --out /opt/hermes/.venv --no-install-project --sealed --record-selection \
             --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
             --extra azure-identity --extra matrix --extra google-chat; \
@@ -314,6 +316,7 @@ RUN set -eu; if [ "${HERMES_FORK_ALL_EXTRAS:-}" = "1" ]; then \
         set -- $extra_args; \
         rm -rf /opt/hermes/.venv; \
         python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
+            --cache /opt/hermes/uv-cache \
             --out /opt/hermes/.venv --no-install-project --sealed --record-selection \
             --plugin /opt/hermes/plugins/memory/honcho "$@"; \
         /opt/hermes/.venv/bin/python -c 'from pathlib import Path; from pm.features import installed_extras, write_features; root=Path("/opt/hermes"); write_features(installed_extras(root, root / ".venv", python_exe=root / ".venv/bin/python"), root)'; \
@@ -351,6 +354,7 @@ RUN node scripts/build/tui.mjs --source /opt/hermes --out /opt/products/tui && \
 
 FROM runtime_base AS runtime
 COPY --from=plugin_deps /opt/hermes/.venv /opt/hermes/.venv
+COPY --from=plugin_deps /opt/hermes/uv-cache /opt/hermes/uv-cache
 COPY --from=plugin_deps /opt/hermes/enabled-features.json /opt/hermes/enabled-features.json
 COPY --from=plugin_deps /opt/hermes/plugins/memory/ /opt/hermes/plugins/memory/
 # Standalone TypeScript linting is a runtime feature; Vite/esbuild are not.
