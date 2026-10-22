@@ -513,28 +513,53 @@ def collect_unheld_api_images(db):
         return 0
 
 
-def _history_mentions(conn, references, after_id=0):
-    """Candidate paths any transcript row (id > after_id) mentions raw or JSON-escaped, in ONE
-    messages pass. Rows are prefiltered in SQL on the literal text before each candidate's digest
-    directory, so only rows that could name a candidate reach Python's exact substring test."""
-    # Matched by the content-addressed tail ``<sha256>/<name>`` with either separator, so every
-    # spelling a note can carry (the host path, a sandbox backend's ``to_agent_visible_cache_path``)
-    # counts as a mention.
+_HISTORY_BATCH_SIZE = 64
+_HISTORY_DIGEST = re.compile(r'[0-9a-f]{64}(?=[/\\])')
+
+
+def _history_needles(references):
+    """Index raw and JSON-escaped tails by digest, including agent-visible path spellings."""
     needles = {}
     for reference in references:
         raw = reference['path']
-        for tail in (reference['sha256'] + sep + Path(raw).name for sep in ('/', '\\')):
-            needles[tail] = needles[json.dumps(tail)[1:-1]] = raw
-    prefixes = sorted({reference['sha256'] for reference in references})
-    # The digests are ONE bound JSON array, never one ``instr`` term each: the statement's size
-    # must not grow with the candidate count (SQLite's expression-depth limit fails at ~1000 terms).
-    query = ('WITH digests(value) AS MATERIALIZED (SELECT value FROM json_each(?)) SELECT content FROM messages '
-             'WHERE EXISTS (SELECT 1 FROM digests WHERE instr(content, digests.value))' + (' AND id>?' if after_id else ''))
+        tails = {reference['sha256'] + sep + Path(raw).name for sep in ('/', '\\', '\\\\')}
+        tails |= {json.dumps(tail)[1:-1] for tail in tails}
+        needles.setdefault(reference['sha256'], []).extend((tail, raw) for tail in tails)
+    return needles
+
+
+def _history_mentions(contents, needles):
+    """Scan each message once, testing only candidates whose digest occurs in its text."""
     mentioned = set()
-    for (content,) in conn.execute(query, (json.dumps(prefixes), *((after_id,) if after_id else ()))):
+    for content in contents:
         text = content.decode('utf-8', 'replace') if isinstance(content, bytes) else str(content)
-        mentioned.update(raw for needle, raw in needles.items() if needle in text)
+        for match in _HISTORY_DIGEST.finditer(text):
+            mentioned.update(raw for needle, raw in needles.get(match.group(), ())
+                             if text.startswith(needle, match.start()))
     return mentioned
+
+
+def _history_snapshot(db, needles):
+    """Release even the fallback writer lock between bounded reads; match text off-lock.
+
+    New transcript rows are checked again in the collection transaction. Deletions during
+    this pass can only retain extra files, and a copied/branched row gets a new message id.
+    """
+    with db._read_ctx() as conn:
+        last_id = conn.execute('SELECT coalesce(max(id), 0) FROM messages').fetchone()[0]
+    seen, after_id = set(), 0
+    wanted = {raw for entries in needles.values() for _, raw in entries}
+    while after_id < last_id:
+        with db._read_ctx() as conn:
+            rows = conn.execute('SELECT id, content FROM messages WHERE id>? AND id<=? ORDER BY id LIMIT ?',
+                                (after_id, last_id, _HISTORY_BATCH_SIZE)).fetchall()
+        if not rows:
+            break
+        after_id = rows[-1][0]
+        seen.update(_history_mentions((row[1] for row in rows), needles))
+        if seen >= wanted:
+            break
+    return seen, last_id
 
 
 def _collectable(references, root):
@@ -545,24 +570,18 @@ def _collectable(references, root):
 def release_unheld_media(db, references, *, retain_history=True):
     """Delete unowned references, preserving accepted admission and retained transcript owners.
 
-    The history owner check is one read-snapshot pass over messages, outside the write lock; under
-    the lock only rows inserted after that snapshot (an indexed id range) are re-checked. A new
+    The history owner check reads bounded batches, matching text outside the database lock; under
+    the lock only rows inserted after that pass's watermark (an indexed id range) are re-checked. A new
     transcript mention of a retained image comes from an admission holding it (re-checked under the
     lock) or from a copied row (branch/compress insert, caught by the range)."""
     root = _media_root()
     references = _collectable(references or (), root)
     if not references:
         return 0
-    seen, last_id = set(), 0
+    needles = _history_needles(references)
+    last_id = 0
     if retain_history:
-        with db._read_ctx() as conn:
-            conn.execute('BEGIN')  # one snapshot: the id watermark and the scan agree
-            try:
-                last_id = conn.execute('SELECT coalesce(max(id), 0) FROM messages').fetchone()[0]
-                seen = _history_mentions(conn, references)
-            finally:
-                if conn.in_transaction:
-                    conn.execute('ROLLBACK')
+        seen, last_id = _history_snapshot(db, needles)
         references = [reference for reference in references if reference['path'] not in seen]
         if not references:
             return 0
@@ -572,7 +591,11 @@ def release_unheld_media(db, references, *, retain_history=True):
         if identities is None:
             return 0
         if retain_history:
-            held |= _history_mentions(conn, references, after_id=last_id)
+            rows = conn.execute('SELECT content FROM messages WHERE id>? ORDER BY id LIMIT ?',
+                                (last_id, _HISTORY_BATCH_SIZE + 1)).fetchall()
+            if len(rows) > _HISTORY_BATCH_SIZE:
+                return 0  # busy transcript: defer collection instead of scanning under the writer lock
+            held |= _history_mentions((row[0] for row in rows), needles)
         released = 0
         for reference in references:
             path = Path(reference['path'])

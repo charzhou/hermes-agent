@@ -166,7 +166,9 @@ def _validate_native(runner, event, provenance=None, fresh_roles=False):
 def snapshot_native(runner, event):
     from gateway.session_ingress_context import capture_provenance
     provenance = capture_provenance(runner, event)
-    return _snapshot_native(runner, _adapter_event(event), provenance)
+    event = _adapter_event(event)
+    payload = _snapshot_native(runner, event, provenance)
+    return _legacy_native_retry(payload, _native_retry_target(runner, event, payload))
 
 
 async def prepare_native(runner, event):
@@ -204,7 +206,10 @@ async def prepare_native(runner, event):
         except BaseException:
             await abandon_capture(scope)
             raise
-    return _snapshot_native(runner, frozen, provenance, fresh_roles, encoded_source, media)
+    payload = _snapshot_native(runner, frozen, provenance, fresh_roles, encoded_source, media)
+    target = _native_retry_target(runner, frozen, payload)
+    # A read can fall back to the writer mutex; freeze the route on the loop, then wait off it.
+    return await asyncio.to_thread(_legacy_native_retry, payload, target) if target is not None else payload
 
 
 def _snapshot_native(runner, event, provenance, fresh_roles=False, encoded_source=None, media=None):
@@ -243,20 +248,38 @@ def _snapshot_native(runner, event, provenance, fresh_roles=False, encoded_sourc
                                  media_text_inlined=list(event.media_text_inlined))
     # Keep the private dispatch key so previously committed text-only rows recover
     # under the same authority; optional media/context fields extend that envelope.
-    payload = {'text': event.text, 'native_text_v1': envelope}
+    return {'text': event.text, 'native_text_v1': envelope}
+
+
+def _native_retry_target(runner, event, payload):
+    """Freeze the exact ledger identity before an asynchronous compatibility lookup."""
     # Only an exact persisted legacy retry retains its old fingerprint. New
     # ordinary admissions must bind homes too, including execution after restart.
-    if provenance is not None and not getattr(runner.config, 'multiplex_profiles', False):
-        from hermes_state_runtime import list_session_admissions
-        from gateway.session_authorities import active_authority
-        authority = active_authority(runner)
-        entry = runner.session_store.lookup_by_session_key(envelope['route'])
-        if entry is not None:
-            legacy = deepcopy(payload)
-            legacy['native_text_v1'].pop('provenance')
-            for row in list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False):
-                if row['request_id'] == event.message_id and row['payload'] == legacy:
-                    return legacy
+    if (payload['native_text_v1'].get('provenance') is None
+            or getattr(runner.config, 'multiplex_profiles', False)):
+        return None
+    from gateway.session_authorities import active_authority
+    entry = runner.session_store.lookup_by_session_key(payload['native_text_v1']['route'])
+    if entry is None:
+        return None
+    source = event.source
+    # The same principal key used by SessionAuthority._admit_native and its UNIQUE ledger index.
+    identity = json.dumps([source.profile, source.platform.value, source.chat_id,
+                           source.thread_id, source.user_id], separators=(',', ':'))
+    return active_authority(runner).db, entry.session_id, 'messaging:' + identity, event.message_id
+
+
+def _legacy_native_retry(payload, target):
+    if target is None:
+        return payload
+    from hermes_state_runtime import find_session_admission
+    db, session_id, principal_id, request_id = target
+    row = find_session_admission(db, principal_id=principal_id, session_id=session_id, request_id=request_id)
+    if row is not None:
+        legacy = deepcopy(payload)
+        legacy['native_text_v1'].pop('provenance')
+        if row['payload'] == legacy:
+            return legacy
     return payload
 
 
