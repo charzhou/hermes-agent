@@ -273,6 +273,21 @@ def has_named_custom_provider(requested_provider: str) -> bool:
         return False
 
 
+def named_custom_provider_matches_endpoint(requested_provider: str, base_url: Optional[str]) -> bool:
+    """Recognize a configured custom route without reading credentials.
+
+    Pending model pickers have no runtime URL yet; resolved routes must match the whole endpoint
+    from the owning profile's config (or the session's frozen runtime config).
+    """
+    from hermes_cli.route_identity import normalize_route_base_url
+
+    entry = _get_named_custom_provider(requested_provider, resolve_credentials=False)
+    if entry is None:
+        return False
+    target = str(base_url or "").strip()
+    return not target or normalize_route_base_url(target) == normalize_route_base_url(entry["base_url"])
+
+
 def codex_model_provider_id(requested_provider: str) -> Optional[str]:
     """Codex ``[model_providers.<id>]`` key for a configured named custom provider — its ``custom:``
     identity without the prefix (the ``providers:`` config key; legacy ``custom_providers:`` entries

@@ -3,7 +3,8 @@
 Origin module; cohesive clusters live in siblings and are re-imported here so
 ``hermes_cli.models.<name>`` stays the stable import/monkeypatch surface:
 ``models_catalog_static`` (curated tables, provider registry, aliases), ``models_reasoning_caps``,
-``models_local`` (Ollama / LM Studio), ``models_pricing``, ``models_validate``.
+``models_local`` (Ollama / LM Studio), ``models_pricing``, ``models_validate``,
+``models_fast`` (fast-mode route eligibility).
 """
 
 from __future__ import annotations
@@ -1249,35 +1250,6 @@ def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
     return is_anthropic_fast_mode_model(model_id)
 
 
-def _fast_mode_route_supported(
-    model_id: Optional[str], provider: Optional[str], base_url: Optional[str]) -> bool:
-    """Allow fast-mode params on first-party routes and custom OpenAI-compatible routes."""
-    from urllib.parse import urlparse
-
-    from agent.model_metadata import is_grok_46_family
-
-    provider_id = normalize_provider(provider)
-    if provider_id == "custom" or provider_id.startswith("custom:"):
-        # A custom endpoint is an explicit operator choice. Hermes cannot verify
-        # its billing semantics, so only eligible OpenAI models opt in here.
-        return _is_openai_fast_model(model_id)
-
-    if _is_anthropic_fast_model(model_id):
-        allowed = {"anthropic": "api.anthropic.com"}
-    elif is_grok_46_family(str(model_id or "")):
-        allowed = {"xai": "api.x.ai"}
-    else:
-        allowed = {
-            "openai": "api.openai.com",
-            "openai-api": "api.openai.com",
-            "openai-codex": "chatgpt.com",
-        }
-    if provider and provider_id not in allowed:
-        return False
-    host = (urlparse(str(base_url or "")).hostname or "").lower()
-    return not host or host in allowed.values()
-
-
 def model_supports_ultrafast(model_id: Optional[str]) -> bool:
     """OpenAI Ultrafast (``service_tier: "ultrafast"``) is published per model, not per family."""
     from agent.model_metadata import strip_codex_context_variant_suffix
@@ -1294,11 +1266,13 @@ def resolve_fast_mode_overrides(
     ``{"service_tier": "priority"}`` (OpenAI / xAI Priority Processing) — or None if unsupported.
     ``tier="ultrafast"`` asks for OpenAI Ultrafast instead: ``{"service_tier": "ultrafast"}`` on an
     Ultrafast model, None elsewhere (never a silent downgrade to a different paid tier).
-    With ``provider``/``base_url`` the route is gated too (``_fast_mode_route_supported``) so proxies
-    never see the params. Single fast-mode gate for ``/fast`` and ``agent.fast_mode`` windows."""
+    With ``provider``/``base_url`` the route is gated too, so unsupported routes never see the params.
+    Single fast-mode gate for ``/fast`` and ``agent.fast_mode`` windows."""
+    from hermes_cli.models_fast import fast_mode_route_supported
+
     if not model_supports_fast_mode(model_id):
         return None
-    if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):
+    if (provider or base_url) and not fast_mode_route_supported(model_id, provider, base_url):
         return None
     if tier == "ultrafast":
         return {"service_tier": "ultrafast"} if model_supports_ultrafast(model_id) else None
