@@ -61,7 +61,7 @@ def build_environment(
         cache=Path(cache) if cache is not None else None, env=env,
         offline=offline, explicit=explicit, output=sys.stderr,
     )
-    with _fresh_build(environment, sealed=sealed):
+    with _fresh_build(environment, sealed=sealed, lock=(out if plugins else source) / "uv.lock"):
         if plugins:
             from pm.workspace import _generate_pyproject
 
