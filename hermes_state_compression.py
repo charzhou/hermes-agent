@@ -22,6 +22,23 @@ logger = logging.getLogger("hermes_state")
 _COOLDOWN_ROW_SQL = (
     "SELECT compression_failure_cooldown_until, compression_failure_error FROM sessions WHERE id = ?"
 )
+_LINEAGE_COLUMNS = "id, parent_session_id, end_reason, source, model_config"
+
+
+def _compression_lineage_row(store, session_id: str) -> Optional[dict[str, Any]]:
+    # Identity walks neither read token totals nor need the resolved prompt/tool blobs.
+    row = store._read_one(f"SELECT {_LINEAGE_COLUMNS} FROM sessions WHERE id = ?", (session_id,))
+    return dict(row) if row is not None else None
+
+
+def _compression_parent_row(store, child: dict[str, Any]) -> Optional[dict[str, Any]]:
+    parent_id = child.get("parent_session_id")
+    # A reset fork of a compression-ended parent is its own conversation (#114271).
+    if not parent_id or store._is_explicit_fork_child_row(child, include_reset=True):
+        return None
+    parent = _compression_lineage_row(store, parent_id)
+    return parent if parent and parent.get("end_reason") == "compression" else None
+
 
 # One forward step of get_compression_chain: the preferred continuation child of ``?``. A reset
 # fork is a separate user-visible conversation (_LISTABLE_CHILD_SQL already surfaces it as its
@@ -904,23 +921,17 @@ class SessionCompressionMixin:
         return _walk_compression_chain(session_id, lambda current: conn.execute(_CHAIN_STEP_SQL, (current,)).fetchone())[-1]
 
     def _is_compression_child_row(self, child: dict[str, Any]) -> bool:
-        parent_id = child.get("parent_session_id")
-        # A reset fork of a compression-ended parent is its own conversation, not the continuation (#114271).
-        if not parent_id or self._is_explicit_fork_child_row(child, include_reset=True):
-            return False
-        parent = self.get_session(parent_id)
-        return bool(parent and parent.get("end_reason") == "compression")
+        return _compression_parent_row(self, child) is not None
 
     def get_compression_lineage(self, session_id: str) -> list[str]:
         """Return compression ancestors through tip in chronological order."""
-        session = self.get_session(session_id)
+        session = _compression_lineage_row(self, session_id)
         if not session or self._is_explicit_fork_child_row(session):
             return [session_id] if session else []
         root = session
         ancestors = {root["id"]}
-        while self._is_compression_child_row(root):
-            parent = self.get_session(root["parent_session_id"])
-            if not parent or parent["id"] in ancestors:
+        while (parent := _compression_parent_row(self, root)) is not None:
+            if parent["id"] in ancestors:
                 break
             root = parent
             ancestors.add(root["id"])
@@ -929,12 +940,15 @@ class SessionCompressionMixin:
         current = root
         while current.get("end_reason") == "compression":
             rows = self._read_all(
-                """
-                SELECT * FROM sessions
+                f"""
+                SELECT {_LINEAGE_COLUMNS} FROM sessions
                 WHERE parent_session_id = ?
                 ORDER BY started_at ASC
                 """, (current["id"],))
-            next_child = next((dict(row) for row in rows if self._is_compression_child_row(dict(row))), None)
+            # The queried parent is already known to end by compression. Re-reading it for every
+            # sibling couples an identity walk to unrelated writes and repeats the same lookup.
+            next_child = next((dict(row) for row in rows
+                               if not self._is_explicit_fork_child_row(dict(row), include_reset=True)), None)
             if not next_child or next_child["id"] in seen:
                 break
             lineage.append(next_child["id"])

@@ -607,6 +607,11 @@ CREATE TABLE IF NOT EXISTS session_admissions (
 );
 CREATE INDEX IF NOT EXISTS session_admissions_pending
     ON session_admissions(target_session_id, status, seq);
+-- Notification retries search automation identities (including batch members), not human history.
+CREATE INDEX IF NOT EXISTS session_admissions_automation
+    ON session_admissions(target_session_id, seq)
+    WHERE json_type(payload_json, '$.local_automation_v1') = 'object'
+       OR json_type(payload_json, '$.native_text_v1.automation') = 'object';
 -- Cron run history finds a job's unified-runtime runs by the scheduler principal's request ids
 -- (``cron:<job>:<execution>``); without this a lookup walked
 -- every cron admission of every job. Partial: interactive turns, the bulk of admissions, pay

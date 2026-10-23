@@ -3,6 +3,7 @@
 Reuse the private native route envelope and FIFO, retaining nonhuman turn semantics.
 A producer ACK means committed input, not successful inference or outbound delivery.
 """
+import asyncio
 from copy import deepcopy
 from datetime import UTC, datetime
 import json
@@ -23,7 +24,7 @@ def producer_identity(runner, event):
     return json.dumps(identity, separators=(',', ':'))
 
 
-def completion_admission(runner, event):
+async def completion_admission(runner, event):
     from gateway.session_authorities import active_authority
     authority = active_authority(runner)
     if authority is None:
@@ -31,13 +32,16 @@ def completion_admission(runner, event):
     entry = runner.session_store.lookup_by_session_key(str(event.get('session_key') or ''))
     if entry is None:
         return None
-    from hermes_state_runtime import list_session_admissions
+    from hermes_state_automation import find_automation_admission
     identity = producer_identity(runner, event)
-    for row in list_session_admissions(authority.db, session_id=_route_owner(authority, entry), pending_only=False):
-        descriptor = row['payload'].get('local_automation_v1') or row['payload'].get('native_text_v1', {}).get('automation', {})
-        if identity in descriptor.get('identities', [descriptor.get('identity')]):
-            return row
-    return None
+    target, route = entry.session_id, entry.session_key
+    owner = await _route_owner(authority, entry)
+    row = await asyncio.to_thread(find_automation_admission, authority.db, session_id=owner,
+                                  identity=identity, principal_id='automation:' + route)
+    current = runner.session_store.lookup_by_session_key(route)
+    # A suspended route can still have a committed receipt. If it moved while reading,
+    # let the ordinary delivery path classify the old pin instead of acknowledging a new one.
+    return row if current is not None and current.session_id == target else None
 
 
 async def deliver_heartbeat(runner, event):
@@ -64,18 +68,18 @@ async def deliver_heartbeat(runner, event):
                 return False
             if delivered is False and prepared is not event:
                 event['_refusal_permanent'] = prepared.get('_refusal_permanent')  # the drain requeues the original
-            if delivered is not False or not _replaced_tick_claimed(runner, prepared):
+            if delivered is not False or not await _replaced_tick_claimed(runner, prepared):
                 return delivered
             # The tick it replaced started first and runs with its own output: admit this one alone.
         return False
 
 
-def _replaced_tick_claimed(runner, prepared):
+async def _replaced_tick_claimed(runner, prepared):
     from gateway.session_authorities import active_authority
     from hermes_state_runtime import get_session_admission
     replaced = prepared.get('_replaces')
     authority = active_authority(runner) if replaced else None
-    row = authority and get_session_admission(authority.db, admission_id=replaced)
+    row = authority and await asyncio.to_thread(get_session_admission, authority.db, admission_id=replaced)
     return bool(row) and row['status'] != 'queued'
 
 
@@ -114,7 +118,7 @@ async def prepare_heartbeat(runner, event):
     entry = runner.session_store.lookup_by_session_key(str(event.get('session_key') or '')) if authority else None
     if entry is None:
         return event
-    owner, process = _route_owner(authority, entry), str(event.get('session_id') or '')
+    owner, process = await _route_owner(authority, entry), str(event.get('session_id') or '')
     if await asyncio.to_thread(_process_completed, runner, authority, owner, event):
         logger.debug("Dropped heartbeat %s of process %s: its completion is already admitted",
                      event.get('event_id'), process)
@@ -176,8 +180,8 @@ async def withdraw_process_ticks(runner, event):
         finished = {identity[1] for identity in _identities(
             [producer_identity(runner, event), *(event.get('_automation_identities') or ())])
             if identity[0] == 'completion' and len(identity) > 1}
-        pending = await asyncio.to_thread(
-            list_session_admissions, authority.db, session_id=_route_owner(authority, entry))
+        owner = await _route_owner(authority, entry)
+        pending = await asyncio.to_thread(list_session_admissions, authority.db, session_id=owner)
         for row in pending:
             if any(_queued_tick(row, process, entry.session_key) for process in finished):
                 await _withdraw(authority, row)
@@ -209,11 +213,8 @@ def _process_completed(runner, authority, owner, event):
         if conn.execute('SELECT 1 FROM session_admissions WHERE target_session_id=? AND request_id=?',
                         (owner, identity)).fetchone():
             return True
-    for row in list_session_admissions(authority.db, session_id=owner, pending_only=False):
-        descriptor = row['payload'].get('local_automation_v1') or row['payload'].get('native_text_v1', {}).get('automation', {})
-        if identity in (descriptor.get('identities') or ()):
-            return True
-    return False
+    from hermes_state_automation import find_automation_admission
+    return find_automation_admission(authority.db, session_id=owner, identity=identity) is not None
 
 
 def _identities(raws):
@@ -252,13 +253,24 @@ async def _withdraw(authority, row):
     return receipt.outcome == 'cancelled'
 
 
-def _route_owner(authority, entry):
+async def _route_owner(authority, entry):
     # Compression moves the route's transcript to a child; admissions stay on the logical root.
+    target = entry.session_id
     return (entry.origin.chat_id if entry.origin.platform == Platform.LOCAL
-            else authority.logical_owner(entry.session_id))
+            else await asyncio.to_thread(authority.logical_owner, target))
 
 
-def _owner(runner, event, authority):
+def _current_entry(runner, route, target):
+    """A DB read may yield to /new, resume or compression; never borrow the replacement's route."""
+    entry = runner.session_store.lookup_by_session_key(route)
+    if entry is None or entry.suspended:
+        raise RuntimeStoreError('not_found')
+    if entry.session_id != target:
+        raise RuntimeStoreError('admission_conflict')
+    return entry
+
+
+async def _owner(runner, event, authority):
     route = event.metadata.get('gateway_session_key') or runner.session_store._generate_session_key(event.source)
     entry = runner.session_store.lookup_by_session_key(route)
     if entry is None or entry.suspended:
@@ -270,7 +282,10 @@ def _owner(runner, event, authority):
         raise RuntimeStoreError('admission_conflict')
     if expected != entry.session_id:
         # A completed child may follow compression, but never /new or an unrelated resume.
-        if authority.db.get_compression_tip(expected) != entry.session_id:
+        target = entry.session_id
+        tip = await asyncio.to_thread(authority.db.get_compression_tip, expected)
+        entry = _current_entry(runner, route, target)
+        if tip != target:
             raise RuntimeStoreError('admission_conflict')
     return entry
 
@@ -333,16 +348,21 @@ def _route_identity(source):
 def committed_route_envelope(authority, entry):
     """The route's last committed native envelope with connector provenance (what a producer turn
     borrows), or ``None`` while no human message was admitted there."""
-    from hermes_state_runtime import list_session_admissions
+    from hermes_state_automation import latest_native_envelope
     # Admissions belong to the logical root; ``entry.session_id`` is only the transcript tip.
-    prior = list_session_admissions(authority.db, session_id=authority.logical_owner(entry.session_id),
-                                    pending_only=False)
-    envelope = next((r['payload']['native_text_v1'] for r in reversed(prior)
-                     if 'native_text_v1' in r['payload']), None)
-    return envelope if envelope is not None and 'provenance' in envelope else None
+    return latest_native_envelope(authority.db, session_id=authority.logical_owner(entry.session_id))
 
 
-def snapshot_automation(authority, adapter, event, identity):
+async def _prepare_route_envelope(authority, entry):
+    from hermes_state_automation import latest_native_envelope
+    target, route = entry.session_id, entry.session_key
+    owner = await _route_owner(authority, entry)
+    envelope = await asyncio.to_thread(latest_native_envelope, authority.db, session_id=owner)
+    entry = _current_entry(authority.runner, route, target)
+    return owner, envelope, entry
+
+
+async def snapshot_automation(authority, adapter, event, identity):
     runner = authority.runner
     if (not event.internal or event.message_type != MessageType.TEXT or event.is_command()
             or not isinstance(event.text, str) or not identity
@@ -351,12 +371,12 @@ def snapshot_automation(authority, adapter, event, identity):
         raise RuntimeStoreError('invalid_params')
     notification = (automation_notification_metadata(event.metadata) | automation_display_metadata(event.metadata)
                     | _tick_metadata(event.metadata))
-    entry = _owner(runner, event, authority)
+    entry = await _owner(runner, event, authority)
     if event.source.platform == Platform.LOCAL:
         return snapshot_local_automation(authority, adapter, event, identity, entry)
     from gateway.session_envelope import restore_native
-    owner = authority.logical_owner(entry.session_id)
-    envelope = committed_route_envelope(authority, entry)
+    owner, envelope, entry = await _prepare_route_envelope(authority, entry)
+    authority._require_admission_open()
     if envelope is None:
         raise RuntimeStoreError('not_found')
     # Persisted origins deliberately omit relay trust. Borrow only an exact
@@ -388,7 +408,7 @@ def snapshot_automation(authority, adapter, event, identity):
     return {'text': event.text, 'native_text_v1': envelope}, entry
 
 
-def check_automation_route(runner, payload, session_id, available_source, adapter):
+async def check_automation_route(runner, payload, session_id, available_source, adapter):
     from gateway.session_envelope import restore_native
     event = restore_native(payload, runner)
     envelope = payload['native_text_v1']
@@ -396,9 +416,12 @@ def check_automation_route(runner, payload, session_id, available_source, adapte
     authority = active_authority(runner)
     if authority is None:  # a late preflight for a profile this runtime no longer serves
         raise RuntimeStoreError('not_found')
-    entry = _owner(runner, event, authority)
+    entry = await _owner(runner, event, authority)
+    target, route = entry.session_id, entry.session_key
+    owner = await _route_owner(authority, entry)
+    entry = _current_entry(runner, route, target)
     if (entry.session_id != session_id
-            or envelope['automation']['owner'] != authority.logical_owner(session_id)
+            or envelope['automation']['owner'] != owner
             or runner.session_store._generate_session_key(available_source) != entry.session_key
             or adapter is None or runner._adapter_for_source(event.source) is not adapter):
         raise RuntimeStoreError('admission_conflict')
@@ -466,8 +489,16 @@ async def admit_automation(authority, adapter, event, identity, replaces=None):
     """``replaces``: a queued automation row of the same session this input supersedes (a liveness
     tick carrying the output of the one still waiting). Its cancellation commits in this admission's
     own transaction, so neither lands without the other."""
+    # Share native input's route FIFO while preparing off-loop. A later human input or notice
+    # must not commit first just because this notice's database read is waiting.
+    async with authority._route_turn(event):
+        return await _admit_automation(authority, adapter, event, identity, replaces)
+
+
+async def _admit_automation(authority, adapter, event, identity, replaces):
     authority._require_admission_open()
-    payload, entry = snapshot_automation(authority, adapter, event, identity)
+    payload, entry = await snapshot_automation(authority, adapter, event, identity)
+    authority._require_admission_open()
     from gateway.session_authority import LiveSession
     sid = (payload.get('local_automation_v1') or payload['native_text_v1']['automation'])['owner']
     ref = SessionRef(authority.profile_id, sid)
@@ -679,7 +710,7 @@ async def admit_route_wake(runner, adapter, source, text, producer, metadata=Non
         await authority.admit_automation(adapter, event, identity)
         return True
     from gateway.session_envelope import restore_native
-    envelope = committed_route_envelope(authority, entry)
+    _, envelope, entry = await _prepare_route_envelope(authority, entry)
     if envelope is None:
         return False
     # The route's committed source, which ``snapshot_automation`` re-derives and compares.

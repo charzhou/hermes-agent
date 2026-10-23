@@ -52,7 +52,7 @@ async def test_completion_after_compression_admits_to_the_logical_root(tmp_path,
     assert list_session_admissions(db, session_id=child, pending_only=False) == []
     # A lost-ACK redelivery is the same admission, found under the root's ledger.
     from gateway.session_automation import completion_admission
-    assert completion_admission(runner, event)['admission_id'] == rows[-1]['admission_id']
+    assert (await completion_admission(runner, event))['admission_id'] == rows[-1]['admission_id']
     await asyncio.sleep(0)
 
 

@@ -49,7 +49,7 @@ async def test_automation_after_compression_and_released_media_uses_logical_owne
     admitted = await authority.admit_automation(adapter, event, 'completion')
     assert admitted.ref.session_id == sid
     rows = list_session_admissions(authority.db, session_id=sid, pending_only=False)
-    assert check_automation_route(runner, rows[-1]['payload'], 'child', source, adapter)[1] == route
+    assert (await check_automation_route(runner, rows[-1]['payload'], 'child', source, adapter))[1] == route
     assert (await authority.admit_automation(adapter, event, 'completion')).admission_id == admitted.admission_id
 
 
@@ -93,4 +93,4 @@ async def test_automation_for_an_unserved_scope_never_dereferences_a_missing_aut
     assert (await authority.admit_automation(adapter, event, 'completion')).ref.session_id == sid
     row = list_session_admissions(authority.db, session_id=sid, pending_only=False)[-1]
     with pytest.raises(RuntimeStoreError, match='not_found'):
-        check_automation_route(runner, row['payload'], 'child', source, adapter)
+        await check_automation_route(runner, row['payload'], 'child', source, adapter)

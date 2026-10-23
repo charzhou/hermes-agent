@@ -1248,7 +1248,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 return claim.early_result
             if getattr(self, 'session_authority', None) is not None:
                 from gateway.session_automation import completion_admission
-                if completion_admission(self, evt) is not None:
+                if await completion_admission(self, evt) is not None:
                     accepted = True  # Lost ACK: finish durable claims, never infer again.
                     return True
             if identity is not None:
@@ -1346,7 +1346,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 return
             if getattr(self, 'session_authority', None) is not None:
                 from gateway.session_automation import completion_admission, producer_identity
-                entries_to_deliver = [item for item in entries if completion_admission(self, item[1]) is None]
+                entries_to_deliver = [item for item in entries if await completion_admission(self, item[1]) is None]
                 if not entries_to_deliver:
                     delivered = True
                     return
@@ -1492,7 +1492,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 continue
             if getattr(self, 'session_authority', None) is not None:
                 from gateway.session_automation import completion_admission
-                if completion_admission(self, evt) is not None:
+                if await completion_admission(self, evt) is not None:
                     acknowledged = await self._deliver_completion_notification(synth_text, evt) is True or acknowledged
                     continue
             parent = str(evt.get("parent_session_id") or "")
@@ -1852,7 +1852,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                         try:
                             # The owning profile's authority, as on the delivery path.
                             async with self._completion_event_scope(completion_evt):
-                                committed = completion_admission(self, completion_evt) is not None
+                                committed = await completion_admission(self, completion_evt) is not None
                         except Exception:
                             # Failing open sends the notice; a dead watcher would send nothing.
                             logger.debug("Process watcher: admission recheck failed for %s", session_id,
