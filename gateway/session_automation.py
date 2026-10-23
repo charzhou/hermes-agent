@@ -341,8 +341,15 @@ def admission_display(payload):
     return card
 
 
+_NON_IDENTITY_SOURCE_FIELDS = frozenset({
+    'message_id', 'chat_name', 'chat_topic', 'auto_thread_created', 'auto_thread_initial_name',
+})
+
+
 def _route_identity(source):
-    return {key: value for key, value in source.to_dict().items() if key != 'message_id'}
+    # The opening origin survives renames and retains one-shot thread-creation markers.
+    # Those labels/markers are not ownership proof; the committed envelope stays intact.
+    return {key: value for key, value in source.to_dict().items() if key not in _NON_IDENTITY_SOURCE_FIELDS}
 
 
 def committed_route_envelope(authority, entry):
@@ -384,8 +391,8 @@ async def snapshot_automation(authority, adapter, event, identity):
     # Recheck only the source/provenance: a completed input's retained media is already released.
     restored = restore_native({'text': event.text, 'native_text_v1': {
         key: value for key, value in envelope.items() if key != 'media'}}, runner)
-    # Synthetic wakes clear ``message_id`` (#52694, #123097) while the committed human source keeps
-    # it, so compare the routing/provenance identity, never the platform reply anchor.
+    # Compare ownership, excluding reply anchors and mutable chat labels. Restore and persist
+    # the committed source unchanged apart from its stale reply anchor.
     if (_route_identity(restored.source) != _route_identity(event.source)
             or runner._adapter_for_source(restored.source) is not adapter):
         raise RuntimeStoreError('admission_conflict')

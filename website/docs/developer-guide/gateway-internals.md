@@ -709,6 +709,12 @@ acceptance. Refused admission refunds every claimed batch sibling without spendi
 actual delivery errors keep their bounded retry policy. Recognized raw API routes resolve after
 persisted messaging origins and defer quietly when unavailable; malformed routes still warn.
 
+Native notification admission compares the originating user and route with the last committed
+source and revalidates its connector provenance. Chat titles/topics and one-time automatic-thread
+creation markers do not identify the owner, so changes to them do not block a completion. The
+notification uses the committed source without its stale reply anchor; the conversation's opening
+origin remains intact for thread recovery and cached context.
+
 Cron execution has its own session. Eligible continuable deliveries may mirror or seed the
 reply-facing conversation: origin, origin-less home fallback, user-written bare-platform home,
 or opted-in explicit targets. `all` expansions do not gain home mirror eligibility. Mirrored
