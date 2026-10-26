@@ -1086,13 +1086,13 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
     # cwd/env overlay are embedded as JSON literals in the watcher source (no extra argv plumbing).
     watcher = textwrap.dedent(
         """
+        import sys
+        if sys.path[:1] == [""]: del sys.path[0]  # -c puts the cwd first: never import from it
         import os
         import subprocess
-        import sys
         import time
-        # Stdlib-only imports: the watcher runs on the updater's interpreter, which after the
-        # package-manager handoff is the bare store Python without the dependency environment.
-        # ``-c`` only puts the cwd on sys.path, so name the checkout explicitly.
+        # Stdlib-only imports: after the package-manager handoff this is the bare store Python;
+        # name the checkout explicitly.
         sys.path.insert(0, {project_root_literal})
         from hermes_cli._subprocess_compat import (
             _WINDOWS_GATEWAY_BREAKAWAY_ENV, pid_exists_stdlib, windows_detach_flags,
@@ -5388,7 +5388,7 @@ def _stop_host_multiplexer(owner) -> int:
 
 
 def _restart_all(system: bool, detach: bool = False) -> None:
-    from hermes_cli.gateway_profile_lifecycle import host_scope_for_all_verb
+    from hermes_cli.gateway_profile_lifecycle import restart_all_verb_scope
     owner = _host_multiplexer_for_all_verb()
     if owner is not None and not _host_multiplexer_is_ours(owner):
         # `--all` means "restart the ONE host multiplexer" — and this profile does not own it.
@@ -5402,11 +5402,11 @@ def _restart_all(system: bool, detach: bool = False) -> None:
         sys.exit(GATEWAY_FATAL_CONFIG_EXIT_CODE)
     # No live owner: stop/kill/start as the host root, not as the invoking profile (whose own
     # gateway the run-side guard would refuse — the host stayed down after a Desktop update).
-    with host_scope_for_all_verb(owner):
-        _restart_all_as_host(owner, system, detach)
+    with restart_all_verb_scope(owner) as owe_online_notice:
+        _restart_all_as_host(owner, system, detach, owe_online_notice)
 
 
-def _restart_all_as_host(owner, system: bool, detach: bool = False) -> None:
+def _restart_all_as_host(owner, system: bool, detach: bool = False, owe_online_notice=lambda: None) -> None:
     service_stopped = _stop_installed_service(system)
     if owner is not None:
         # Stop ONLY the host process: its served set comes back with it, and any per-profile
@@ -5426,8 +5426,8 @@ def _restart_all_as_host(owner, system: bool, detach: bool = False) -> None:
     # Retract the stopped owner's rendezvous record. Leaving it made this very function a silent
     # no-op: the re-entered `gateway run` below read the corpse's record and ATTACHED to it.
     _discard_dead_host_record()
-    # The retraction only invalidates when it removed a record; the pre-stop memo must go either way.
-    _forget_host_gateway_probe()
+    _forget_host_gateway_probe()  # the retraction invalidates only a removed record; drop the memo anyway
+    owe_online_notice()  # old host gone, new one not started: only the new boot can see it
 
     print("Starting gateway...")
     # Even without a registered task, gateway_windows.start() uses the detached launcher.

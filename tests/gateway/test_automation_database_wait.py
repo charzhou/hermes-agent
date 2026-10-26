@@ -21,9 +21,15 @@ async def _native_notice(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_native_notice_database_wait_keeps_gateway_responsive(tmp_path, monkeypatch):
+@pytest.mark.parametrize('delegated', [False, True])
+async def test_native_notice_database_wait_keeps_gateway_responsive(tmp_path, monkeypatch, delegated):
     _, adapter, authority, event = await _native_notice(tmp_path, monkeypatch)
     db = authority.db
+    owner = event.metadata['gateway_session_id']
+    if delegated:
+        child = owner + '-delegate'
+        db.create_session(child, source='subagent', parent_session_id=owner, model_config={'_delegate_from': owner})
+        event.metadata['gateway_session_id'] = child
     db._wal_active = False  # Exercise the supported writer-connection read fallback.
     held, release, expired = threading.Event(), threading.Event(), threading.Event()
     read_started = asyncio.Event()
@@ -54,7 +60,7 @@ async def test_native_notice_database_wait_keeps_gateway_responsive(tmp_path, mo
         receipt = await asyncio.wait_for(pending, 10)
         row = get_session_admission(db, admission_id=receipt.admission_id)
         assert row['status'] == 'queued'
-        assert row['target_session_id'] == event.metadata['gateway_session_id']
+        assert row['target_session_id'] == owner
         assert row['payload']['text'] == 'process finished'
     finally:
         release.set()

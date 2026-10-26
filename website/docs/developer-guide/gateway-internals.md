@@ -709,11 +709,16 @@ acceptance. Refused admission refunds every claimed batch sibling without spendi
 actual delivery errors keep their bounded retry policy. Recognized raw API routes resolve after
 persisted messaging origins and defer quietly when unavailable; malformed routes still warn.
 
-Native notification admission compares the originating user and route with the last committed
-source and revalidates its connector provenance. Chat titles/topics and one-time automatic-thread
-creation markers do not identify the owner, so changes to them do not block a completion. The
-notification uses the committed source without its stale reply anchor; the conversation's opening
-origin remains intact for thread recovery and cached context.
+Native notification admission resolves the producer's source to the same route as the last
+committed source and revalidates its connector provenance. Per-user routes still isolate users;
+display labels and stale producer hints cannot replace the committed source. The notification
+uses that committed source without its stale reply anchor; the conversation's opening origin
+remains intact for thread recovery and cached context.
+
+The fork keeps admission's ownership and committed-envelope database reads off the gateway
+loop. Ownership may follow compression or a delegate's recorded parent chain, but never a user
+boundary such as `/new`. Each awaited lookup rechecks the live route before admission so a reset
+while the database waits cannot move the notification into the replacement conversation.
 
 Cron execution has its own session. Eligible continuable deliveries may mirror or seed the
 reply-facing conversation: origin, origin-less home fallback, user-written bare-platform home,

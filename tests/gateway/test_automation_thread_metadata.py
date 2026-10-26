@@ -85,7 +85,7 @@ async def test_notice_after_thread_metadata_changes_keeps_owner_and_retry_identi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('changed_field', ['scope_id', 'parent_chat_id', 'profile', 'prospective_thread_id', 'adapter'])
+@pytest.mark.parametrize('changed_field', ['chat_id', 'thread_id', 'adapter'])
 async def test_thread_notice_still_refuses_changed_routing_or_transport(tmp_path, monkeypatch, changed_field):
     _runner, authority, adapter, _opening, current, entry, latest = await _renamed_thread(tmp_path, monkeypatch)
     try:
@@ -100,5 +100,26 @@ async def test_thread_notice_still_refuses_changed_routing_or_transport(tmp_path
         with pytest.raises(RuntimeStoreError, match='admission_conflict'):
             await authority.admit_automation(adapter, event, 'thread-notice')
         assert _automation_rows(authority, latest.ref.session_id) == []
+    finally:
+        authority.db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('changed_field', ['scope_id', 'parent_chat_id', 'profile', 'prospective_thread_id'])
+async def test_notice_uses_committed_source_when_producer_hints_drift(tmp_path, monkeypatch, changed_field):
+    runner, authority, adapter, _opening, current, entry, latest = await _renamed_thread(tmp_path, monkeypatch)
+    try:
+        source = replace_source(current, **{changed_field: '9999'})
+        assert runner.session_store._generate_session_key(source) == entry.session_key
+        expected = deepcopy(get_session_admission(
+            authority.db, admission_id=latest.admission_id)['payload']['native_text_v1']['source'])
+        expected.pop('message_id')
+        event = MessageEvent(text='Inspection finished', source=source, internal=True,
+                             metadata={'gateway_session_key': entry.session_key,
+                                       'gateway_session_id': entry.session_id})
+        receipt = await authority.admit_automation(adapter, event, 'thread-notice')
+        row = get_session_admission(authority.db, admission_id=receipt.admission_id)
+        assert row['target_session_id'] == latest.ref.session_id
+        assert row['payload']['native_text_v1']['source'] == expected
     finally:
         authority.db.close()
