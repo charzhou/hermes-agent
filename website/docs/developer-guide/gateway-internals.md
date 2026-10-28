@@ -719,6 +719,9 @@ The fork keeps admission's ownership and committed-envelope database reads off t
 loop. Ownership may follow compression or a delegate's recorded parent chain, but never a user
 boundary such as `/new`. Each awaited lookup rechecks the live route before admission so a reset
 while the database waits cannot move the notification into the replacement conversation.
+Detached conversations resolve through their live authority rather than a persisted chat route.
+Their entry reads stay off the gateway loop, and completion retries find the original admission
+receipt even when the runner's bounded source cache has forgotten the conversation.
 
 Cron execution has its own session. Eligible continuable deliveries may mirror or seed the
 reply-facing conversation: origin, origin-less home fallback, user-written bare-platform home,
