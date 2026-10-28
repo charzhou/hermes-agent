@@ -67,7 +67,8 @@ def build_environment(
 
             with tempfile.TemporaryDirectory(prefix="pm-build-plugins-") as temporary:
                 workspace = Path(temporary) / "workspace"
-                _generate_pyproject([Path(path) for path in plugins], workspace, source=source)
+                _generate_pyproject([Path(path) for path in plugins], workspace,
+                                    source=source, python=environment.python)
                 seed = source / "uv.lock"
                 if seed.is_file():
                     shutil.copy2(seed, workspace / "uv.lock")

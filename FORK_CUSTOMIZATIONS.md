@@ -46,3 +46,6 @@ when a customization is added, removed, or absorbed upstream.
 The payload manifest resolver now handles Docker's in-place `repo: "."` layout
 upstream. Keep that shared resolver; the fork's sealed-environment selection still
 prevents an old writable generation from hiding bundled dependencies.
+
+Explicit plugin builds pass the managed environment's target Python into upstream's
+workspace generator so the combined dependency graph matches the image interpreter.
