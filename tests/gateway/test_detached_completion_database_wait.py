@@ -24,6 +24,8 @@ async def test_detached_completion_retry_finds_its_receipt(monkeypatch, database
     rows = await async_wait_until(
         lambda: [row for row in _automation_rows(authority, ref.session_id, live.route)
                  if row['status'] == 'terminal'], timeout=10, what='the detached completion receipt')
+    # Settlement precedes drain cleanup; finish it before contending on the retry's database read.
+    await asyncio.wait_for(live.task, 10)
     assert runner.session_store.lookup_by_session_key(live.route) is None
 
     if database_wait:
