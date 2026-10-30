@@ -12,7 +12,8 @@ import pytest
 from tests.pm._fixtures import _run, _wheel
 
 
-def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monkeypatch):
+@pytest.mark.parametrize("plugin_test_group", [False, True])
+def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monkeypatch, plugin_test_group):
     from pm.environment import managed_environment
     from pm.operations import build_environment
     from pm.package import InstallError
@@ -28,7 +29,7 @@ def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monk
     _wheel(wheels, "base_dep")
     _wheel(wheels, "shared_dep", "2.0")
     (source / "pyproject.toml").write_text(
-        '[project]\nname="override-root"\nversion="1"\nrequires-python=">=3.11"\n'
+        '[project]\nname="hermes-agent"\nversion="1"\nrequires-python=">=3.11"\n'
         'dependencies=["base-dep==1.0"]\n'
         '[tool.uv]\npackage=false\nno-index=true\noverride-dependencies=["shared-dep==2.0"]\n'
         f'find-links=[{json.dumps(wheels.as_posix())}]\n', encoding="utf-8",
@@ -48,6 +49,16 @@ def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monk
     (plugin / "plugin.yaml").write_text(
         'name: plugin\npython_dependencies: ["plugin-dep==1.0"]\n', encoding="utf-8",
     )
+    project = plugin / "pyproject.toml"
+    if plugin_test_group:
+        # Honcho's development suite references another Hermes checkout; runtime builds
+        # must neither resolve that source nor install the plugin's test tools.
+        project.write_text(
+            '[project]\nname="fixture-plugin"\nversion="1"\n'
+            'dependencies=["plugin-dep==1.0"]\n'
+            '[dependency-groups]\ntest=["hermes-agent @ git+https://example.invalid/hermes", "test-only==1.0"]\n'
+            '[tool.uv]\npackage=false\n', encoding="utf-8")
+        original_project = project.read_bytes()
     out = tmp_path / "sealed environment"
     executable = build_environment(
         source=source, plugins=[plugin], out=out, python=Path(sys.executable),
@@ -60,6 +71,11 @@ def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monk
     assert overridden_versions(out / "uv.lock") == {"shared-dep": {"2.0"}}
     assert (source / "uv.lock").read_bytes() == seed
     assert not list(out.rglob("__editable__*.pth"))
+    if plugin_test_group:
+        assert project.read_bytes() == original_project
+        assert _run([str(executable), "-I", "-c",
+                     "import importlib.util; print(importlib.util.find_spec('test_only'))"],
+                    cwd=tmp_path, env=env) == "None"
 
     environment = managed_environment(out, python=Path(sys.executable), cache=tmp_path / "cache",
                                       env=env, offline=True, explicit=True)

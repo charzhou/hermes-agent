@@ -49,3 +49,6 @@ prevents an old writable generation from hiding bundled dependencies.
 
 Explicit plugin builds pass the managed environment's target Python into upstream's
 workspace generator so the combined dependency graph matches the image interpreter.
+They omit plugin dependency groups from the temporary runtime build snapshot: a
+plugin's test suite may reference a separate Hermes checkout. The catalog-pinned
+plugin source and its runtime dependencies remain unchanged.
