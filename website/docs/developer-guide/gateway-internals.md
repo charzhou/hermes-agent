@@ -723,6 +723,13 @@ Detached conversations resolve through their live authority rather than a persis
 Their entry reads stay off the gateway loop, and completion retries find the original admission
 receipt even when the runner's bounded source cache has forgotten the conversation.
 
+Completions that land while the session is busy fold into ONE queued turn
+(`session_automation.py::_admit_folded_completion`): a completion whose route already has a
+completion waiting at the very end of the FIFO replaces it with a combined admission (both texts,
+every producer identity, a "N background process results" header), cancelling the waiting row in
+the same transaction. Only the tail folds, so a prompt queued after a completion keeps its place
+between them; a waiting row claimed first leaves the new completion to queue alone.
+
 Cron execution has its own session. Eligible continuable deliveries may mirror or seed the
 reply-facing conversation: origin, origin-less home fallback, user-written bare-platform home,
 or opted-in explicit targets. `all` expansions do not gain home mirror eligibility. Mirrored

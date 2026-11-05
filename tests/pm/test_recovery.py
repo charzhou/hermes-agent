@@ -98,8 +98,8 @@ def test_refresh_dependencies_replays_current_shipped_features(tmp_path, monkeyp
 
     monkeypatch.setattr("pm.client.sync_venv", sync)
 
-    assert recovery.refresh_dependencies(core) == "rebuilt"
-    assert calls == [(["all", "messaging"], {"explicit": True})]
+    assert recovery.refresh_dependencies(core) == "restored all"
+    assert calls == [(["all"], {"explicit": True, "automatic": ["all"]})]
 
 
 def test_sealed_payload_fallback_keeps_stale_overlay_out_of_startup_drift(tmp_path, monkeypatch):

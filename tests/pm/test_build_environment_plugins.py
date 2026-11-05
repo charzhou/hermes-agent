@@ -12,8 +12,8 @@ import pytest
 from tests.pm._fixtures import _run, _wheel
 
 
-@pytest.mark.parametrize("plugin_test_group", [False, True])
-def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monkeypatch, plugin_test_group):
+@pytest.mark.parametrize("plugin_test_group,extra_mode", [(False, "none"), (True, "none"), (True, "selected"), (True, "all")])
+def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monkeypatch, plugin_test_group, extra_mode):
     from pm.environment import managed_environment
     from pm.operations import build_environment
     from pm.package import InstallError
@@ -30,7 +30,7 @@ def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monk
     _wheel(wheels, "shared_dep", "2.0")
     (source / "pyproject.toml").write_text(
         '[project]\nname="hermes-agent"\nversion="1"\nrequires-python=">=3.11"\n'
-        'dependencies=["base-dep==1.0"]\n'
+        'dependencies=["base-dep==1.0"]\n[project.optional-dependencies]\nimage=[]\n'
         '[tool.uv]\npackage=false\nno-index=true\noverride-dependencies=["shared-dep==2.0"]\n'
         f'find-links=[{json.dumps(wheels.as_posix())}]\n', encoding="utf-8",
     )
@@ -46,6 +46,8 @@ def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monk
 
     # The plugin brings an overridden dependency absent from the core graph.
     _wheel(wheels, "plugin_dep", requirements=("shared-dep==1.0",))
+    _wheel(wheels, "plugin_extra")
+    _wheel(wheels, "plugin_only")
     (plugin / "plugin.yaml").write_text(
         'name: plugin\npython_dependencies: ["plugin-dep==1.0"]\n', encoding="utf-8",
     )
@@ -56,6 +58,7 @@ def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monk
         project.write_text(
             '[project]\nname="fixture-plugin"\nversion="1"\n'
             'dependencies=["plugin-dep==1.0"]\n'
+            '[project.optional-dependencies]\nimage=["plugin-extra==1.0"]\npluginonly=["plugin-only==1.0"]\n'
             '[dependency-groups]\ntest=["hermes-agent @ git+https://example.invalid/hermes", "test-only==1.0"]\n'
             '[tool.uv]\npackage=false\n', encoding="utf-8")
         original_project = project.read_bytes()
@@ -63,7 +66,8 @@ def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monk
     executable = build_environment(
         source=source, plugins=[plugin], out=out, python=Path(sys.executable),
         cache=tmp_path / "cache", env=env, offline=True, sealed=True,
-        no_install_project=True, explicit=True,
+        no_install_project=True, explicit=True, extras=["image"] if extra_mode == "selected" else (),
+        all_extras=extra_mode == "all",
     )
     assert _run([str(executable), "-I", "-c",
                  "import base_dep, plugin_dep, shared_dep; print(shared_dep.__version__)"],
@@ -71,6 +75,12 @@ def test_plugin_build_checks_resolved_override_and_keeps_its_lock(tmp_path, monk
     assert overridden_versions(out / "uv.lock") == {"shared-dep": {"2.0"}}
     assert (source / "uv.lock").read_bytes() == seed
     assert not list(out.rglob("__editable__*.pth"))
+    if extra_mode != "none":
+        assert _run([str(executable), "-I", "-c", "import plugin_extra; print(plugin_extra.__version__)"],
+                    cwd=tmp_path, env=env) == "1.0"
+    if extra_mode == "all":
+        assert _run([str(executable), "-I", "-c", "import plugin_only; print(plugin_only.__version__)"],
+                    cwd=tmp_path, env=env) == "1.0"
     if plugin_test_group:
         assert project.read_bytes() == original_project
         assert _run([str(executable), "-I", "-c",

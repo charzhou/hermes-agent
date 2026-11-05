@@ -63,22 +63,26 @@ def build_environment(
     )
     with _fresh_build(environment, sealed=sealed, lock=(out if plugins else source) / "uv.lock"):
         if plugins:
-            import tomllib
-
-            import tomli_w
-
             from pm.workspace import _generate_pyproject
 
             with tempfile.TemporaryDirectory(prefix="pm-build-plugins-") as temporary:
                 workspace = Path(temporary) / "workspace"
+                selected_extras = extras
+                if all_extras:
+                    import tomllib
+
+                    from pm.features import declared_extras, opt_in_extras
+                    from pm.plugin_declarations import read_python_declaration
+
+                    selected = set(declared_extras(source))
+                    for plugin in plugins:
+                        declaration = read_python_declaration(Path(plugin))
+                        if declaration.pyproject is not None and declaration.installs_packages:
+                            document = tomllib.loads(declaration.pyproject.read_text(encoding="utf-8-sig"))
+                            selected.update(document.get("project", {}).get("optional-dependencies", {}))
+                    selected_extras = sorted(set(extras) | (selected - set(opt_in_extras(source))))
                 _generate_pyproject([Path(path) for path in plugins], workspace,
-                                    source=source, python=environment.python)
-                # uv parses even unselected groups. A plugin's development suite can
-                # reference another Hermes checkout, which cannot join this runtime graph.
-                for manifest in (workspace / "plugin-sources").glob("*/pyproject.toml"):
-                    document = tomllib.loads(manifest.read_text(encoding="utf-8"))
-                    if document.pop("dependency-groups", None) is not None:
-                        manifest.write_text(tomli_w.dumps(document), encoding="utf-8")
+                                    source=source, python=environment.python, extras=selected_extras)
                 seed = source / "uv.lock"
                 if seed.is_file():
                     shutil.copy2(seed, workspace / "uv.lock")

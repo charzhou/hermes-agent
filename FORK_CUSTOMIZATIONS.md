@@ -47,8 +47,7 @@ The payload manifest resolver now handles Docker's in-place `repo: "."` layout
 upstream. Keep that shared resolver; the fork's sealed-environment selection still
 prevents an old writable generation from hiding bundled dependencies.
 
-Explicit plugin builds pass the managed environment's target Python into upstream's
-workspace generator so the combined dependency graph matches the image interpreter.
-They omit plugin dependency groups from the temporary runtime build snapshot: a
-plugin's test suite may reference a separate Hermes checkout. The catalog-pinned
-plugin source and its runtime dependencies remain unchanged.
+Explicit plugin builds pass the managed environment's target Python and selected
+extras into upstream's workspace generator. The shared generator omits plugin
+development groups from the temporary runtime snapshot while preserving selected
+runtime dependencies and the catalog-pinned source.
