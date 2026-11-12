@@ -62,7 +62,8 @@ def test_named_custom_fast_requires_the_profiles_configured_route(tmp_path, monk
             with frozen_runtime_config({"providers": {"tegical-openai": invalid_entry}}):
                 assert tier() is None
         with frozen_runtime_config({"providers": {"openrouter": entry}}):
-            assert tier(provider="openrouter") is None
+            assert tier(provider="openrouter") == {"service_tier": "priority"}
+            assert tier(provider="openrouter", base_url="https://openrouter.ai/api/v1") is None
 
     other_home = tmp_path / "other-profile"
     other_home.mkdir()

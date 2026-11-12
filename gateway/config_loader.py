@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 from gateway.config import (
     UNAUTHORIZED_DM_BEHAVIORS, Platform, PlatformConfig, _coerce_dict, _dict_slot,
-    _normalize_choice, normalize_reply_to_mode,
+    _normalize_choice, _reply_to_mode_choice,
 )
 
 # Logger name parity with the origin module: records stay under "gateway.config".
@@ -382,7 +382,7 @@ def bridge_platform_shared_keys(
         plat_data = _dict_slot(platforms_data, plat.value)
         extra = _dict_slot(plat_data, "extra")
         if has_reply_to_mode:
-            plat_data["reply_to_mode"] = normalize_reply_to_mode(platform_cfg["reply_to_mode"])
+            plat_data["reply_to_mode"] = _reply_to_mode_choice(platform_cfg["reply_to_mode"])
         if enabled_was_explicit:
             plat_data["enabled"] = platform_cfg["enabled"]
             extra["_enabled_explicit"] = True

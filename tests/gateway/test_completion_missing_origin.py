@@ -59,7 +59,7 @@ async def test_completion_uses_logical_owner_after_route_restore(tmp_path, monke
     store._entries[key] = SessionEntry.from_dict(json.loads(stored))
     event = dict(pending(key, 'restored-completion'), parent_session_id=target)
 
-    assert completion_admission(runner, event) is None
+    assert await completion_admission(runner, event) is None
     assert await runner._deliver_async_delegation_group([event]) is True
     rows = list_session_admissions(authority.db, session_id=root, pending_only=False)
     assert len(rows) == 2 and 'restored-completion' in rows[-1]['payload']['text']
@@ -69,7 +69,7 @@ async def test_completion_uses_logical_owner_after_route_restore(tmp_path, monke
     if missing_origin:
         store._entries[key].origin = None
     runner._completion_deliveries_delivered.clear()
-    assert completion_admission(runner, event)['admission_id'] == rows[-1]['admission_id']
+    assert (await completion_admission(runner, event))['admission_id'] == rows[-1]['admission_id']
     assert await runner._deliver_async_delegation_group([event]) is None
     assert len(list_session_admissions(authority.db, session_id=root, pending_only=False)) == 2
     if compressed:
@@ -106,7 +106,7 @@ async def test_local_null_origin_never_acknowledges_the_wrong_owner(tmp_path, mo
     assert runner._get_cached_session_source(key) is None
     event = dict(pending(key, 'local-null-origin'), parent_session_id=target)
 
-    assert completion_admission(runner, event) is None
+    assert await completion_admission(runner, event) is None
     # Reconstructing a LOCAL source from its key does not prove local admission ownership.
     for _ in range(2):
         assert await runner._deliver_async_delegation_group([event]) is False
