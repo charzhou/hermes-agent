@@ -31,5 +31,9 @@ def fast_mode_route_supported(
         from hermes_cli.runtime_provider_custom import named_custom_provider_matches_endpoint
 
         return _is_openai_fast_model(model_id) and named_custom_provider_matches_endpoint(provider, base_url)
+    if "openai" in allowed:
+        from hermes_cli.models_fast_regions import openai_fast_region_allows
+        if openai_fast_region_allows(base_url, model_id):
+            return True
     host = (urlparse(str(base_url or "")).hostname or "").lower()
     return not host or host in allowed.values()
