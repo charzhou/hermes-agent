@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 
 def fast_mode_route_supported(
-    model_id: Optional[str], provider: Optional[str], base_url: Optional[str],
+    model_id: Optional[str], provider: Optional[str], base_url: Optional[str], tier: Optional[str] = None,
 ) -> bool:
     """Allow fast-mode params on first-party routes and custom OpenAI-compatible routes."""
     from agent.model_metadata import is_grok_46_family
@@ -33,7 +33,7 @@ def fast_mode_route_supported(
         return _is_openai_fast_model(model_id) and named_custom_provider_matches_endpoint(provider, base_url)
     if "openai" in allowed:
         from hermes_cli.models_fast_regions import openai_fast_region_allows
-        if openai_fast_region_allows(base_url, model_id):
+        if openai_fast_region_allows(base_url, model_id, tier):
             return True
     host = (urlparse(str(base_url or "")).hostname or "").lower()
     return not host or host in allowed.values()

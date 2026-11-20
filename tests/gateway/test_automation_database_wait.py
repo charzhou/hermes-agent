@@ -6,7 +6,9 @@ import threading
 import pytest
 
 from gateway.platforms.event import MessageEvent
-from hermes_state_runtime import RuntimeStoreError, get_session_admission, list_session_admissions
+from persistence.core.errors import AuthorityRefusal
+from tests.fixtures.storage_holder import raw_holder
+from tests.fixtures.storage_seed import seed_session
 from tests.gateway.test_automation_compression_media import _admit_human, _discord_owner
 
 
@@ -24,12 +26,13 @@ async def _native_notice(tmp_path, monkeypatch):
 @pytest.mark.parametrize('delegated', [False, True])
 async def test_native_notice_database_wait_keeps_gateway_responsive(tmp_path, monkeypatch, delegated):
     _, adapter, authority, event = await _native_notice(tmp_path, monkeypatch)
-    db = authority.db
+    store = authority.persistence
     owner = event.metadata['gateway_session_id']
     if delegated:
         child = owner + '-delegate'
-        db.create_session(child, source='subagent', parent_session_id=owner, model_config={'_delegate_from': owner})
+        seed_session(store, child, source='subagent', parent_session_id=owner, model_config={'_delegate_from': owner})
         event.metadata['gateway_session_id'] = child
+    db = raw_holder(store)
     db._wal_active = False  # Exercise the supported writer-connection read fallback.
     held, release, expired = threading.Event(), threading.Event(), threading.Event()
     read_started = asyncio.Event()
@@ -58,26 +61,27 @@ async def test_native_notice_database_wait_keeps_gateway_responsive(tmp_path, mo
         assert not pending.done()
         release.set()
         receipt = await asyncio.wait_for(pending, 10)
-        row = get_session_admission(db, admission_id=receipt.admission_id)
-        assert row['status'] == 'queued'
-        assert row['target_session_id'] == owner
-        assert row['payload']['text'] == 'process finished'
+        row = store.admissions.get(admission_id=receipt.admission_id)
+        assert row.status == 'queued'
+        assert row.target_session_id == owner
+        assert row.payload['text'] == 'process finished'
     finally:
         release.set()
         await holder
         if pending is not None:
             await pending
-        db.close()
+        store.close()
 
 
 @pytest.mark.asyncio
 async def test_notice_waiting_for_database_never_enters_a_reset_conversation(tmp_path, monkeypatch):
     runner, adapter, authority, event = await _native_notice(tmp_path, monkeypatch)
-    db = authority.db
+    store = authority.persistence
     original_session = event.metadata['gateway_session_id']
     route = event.metadata['gateway_session_key']
     read_started = asyncio.Event()
     release, expired = threading.Event(), threading.Event()
+    db = raw_holder(store)
     loop, original_read = asyncio.get_running_loop(), db._read_ctx
     first_read = True
 
@@ -101,28 +105,26 @@ async def test_notice_waiting_for_database_never_enters_a_reset_conversation(tmp
         assert replacement.session_id != original_session
         release.set()
         result = (await asyncio.wait_for(asyncio.gather(pending, return_exceptions=True), 10))[0]
-        if isinstance(result, RuntimeStoreError):
+        if isinstance(result, AuthorityRefusal):
             assert result.reason in {'admission_conflict', 'stale_generation'}
         else:
             assert not isinstance(result, BaseException)
             assert result.ref.session_id == original_session
-        assert list_session_admissions(db, session_id=replacement.session_id, pending_only=False) == []
+        assert store.admissions.list(session_id=replacement.session_id, pending_only=False) == []
     finally:
         release.set()
         await asyncio.gather(pending, return_exceptions=True)
-        db.close()
+        store.close()
 
 
 @pytest.mark.asyncio
 async def test_later_human_input_cannot_overtake_a_notice_waiting_for_database(tmp_path, monkeypatch):
-    import hermes_state_automation
-
     runner, adapter, authority, event = await _native_notice(tmp_path, monkeypatch)
-    db = authority.db
+    store = authority.persistence
     read_started = asyncio.Event()
     release = threading.Event()
     loop = asyncio.get_running_loop()
-    original_read = hermes_state_automation.latest_native_envelope
+    original_read = store.admissions.latest_native_envelope
     first_read = True
 
     def delayed_read(*args, **kwargs):
@@ -133,7 +135,7 @@ async def test_later_human_input_cannot_overtake_a_notice_waiting_for_database(t
             assert release.wait(5), 'notice database read was never released'
         return original_read(*args, **kwargs)
 
-    monkeypatch.setattr(hermes_state_automation, 'latest_native_envelope', delayed_read)
+    monkeypatch.setattr(store.admissions, 'latest_native_envelope', delayed_read)
     first = asyncio.create_task(authority.admit_automation(adapter, event, 'finished'))
     second = None
     try:
@@ -148,4 +150,4 @@ async def test_later_human_input_cannot_overtake_a_notice_waiting_for_database(t
     finally:
         release.set()
         await asyncio.gather(first, *([second] if second is not None else []), return_exceptions=True)
-        db.close()
+        store.close()

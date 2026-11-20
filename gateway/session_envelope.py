@@ -15,7 +15,8 @@ import os
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.session import SessionSource
 from gateway.session_ingress_media import capture_native_media, restore_native_media
-from hermes_state_runtime import RuntimeStoreError
+from gateway.session_persistence import authority_persistence
+from persistence.core.errors import AuthorityRefusal
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ def _refuse(event, reason, clause):
     logger.warning('Native admission refused: %s (%s) platform=%s chat=%s message=%s', reason, clause,
                    getattr(getattr(source, 'platform', None), 'value', None), getattr(source, 'chat_id', None),
                    event.message_id)
-    raise RuntimeStoreError(reason, field=clause)
+    raise AuthorityRefusal(reason, field=clause)
 
 
 def _media_clause(event):
@@ -247,7 +248,7 @@ def _snapshot_native(runner, event, provenance, fresh_roles=False, encoded_sourc
         from gateway.platforms.webhook_delivery import route_digest, snapshot_destination
         adapter = runner._adapter_for_source(event.source)
         if provenance is None:
-            raise RuntimeStoreError('permission_denied')
+            raise AuthorityRefusal('permission_denied')
         delivery = snapshot_destination(adapter, adapter._delivery_info.get(event.source.chat_id))
         envelope['webhook_delivery'] = delivery
         envelope['webhook_route'] = route_digest(adapter, event.source.chat_id)
@@ -292,19 +293,19 @@ def _native_retry_target(runner, event, payload):
     # The same principal key used by SessionAuthority._admit_native and its UNIQUE ledger index.
     identity = json.dumps([source.profile, source.platform.value, source.chat_id,
                            source.thread_id, source.user_id], separators=(',', ':'))
-    return active_authority(runner).db, entry.session_id, 'messaging:' + identity, event.message_id
+    admissions = authority_persistence(active_authority(runner)).admissions
+    return admissions, entry.session_id, 'messaging:' + identity, event.message_id
 
 
 def _legacy_native_retry(payload, target):
     if target is None:
         return payload
-    from hermes_state_runtime import find_session_admission
-    db, session_id, principal_id, request_id = target
-    row = find_session_admission(db, principal_id=principal_id, session_id=session_id, request_id=request_id)
+    admissions, session_id, principal_id, request_id = target
+    row = admissions.find(principal_id=principal_id, session_id=session_id, request_id=request_id)
     if row is not None:
         legacy = deepcopy(payload)
         legacy['native_text_v1'].pop('provenance')
-        if row['payload'] == legacy:
+        if row.payload == legacy:
             return legacy
     return payload
 
@@ -366,16 +367,16 @@ async def check_native_route(runner, payload, session_id, available_source, adap
     store = runner.session_store
     if (store._generate_session_key(event.source) != route
             or store._generate_session_key(available_source) != route):
-        raise RuntimeStoreError('admission_conflict')
+        raise AuthorityRefusal('admission_conflict')
     entry = store.lookup_by_session_key(route)
     if entry is None or entry.session_id != session_id:
-        raise RuntimeStoreError('admission_conflict')
+        raise AuthorityRefusal('admission_conflict')
     if adapter is None or runner._adapter_for_source(event.source) is not adapter:
-        raise RuntimeStoreError('not_found')
+        raise AuthorityRefusal('not_found')
     if event.source.platform.value == 'webhook':
         from gateway.platforms.webhook_delivery import route_digest, validate_destination
         envelope = payload['native_text_v1']
         validate_destination(envelope.get('webhook_delivery'))
         if envelope.get('webhook_route') != route_digest(adapter, event.source.chat_id):
-            raise RuntimeStoreError('admission_conflict')
+            raise AuthorityRefusal('admission_conflict')
     return event.source, route

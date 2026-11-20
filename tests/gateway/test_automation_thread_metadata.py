@@ -9,8 +9,7 @@ from gateway.run import GatewayRunner
 from gateway.session_authority import SessionAuthority, initialize_session_authority
 from gateway.session_identity import replace_source
 from gateway.session_ingress_context import native_callback, register_transport_home
-from hermes_state import SessionDB
-from hermes_state_runtime import RuntimeStoreError, get_session_admission, list_session_admissions
+from persistence.core.errors import AuthorityRefusal
 from plugins.platforms.discord.adapter import DiscordAdapter
 
 
@@ -19,10 +18,8 @@ async def _renamed_thread(tmp_path, monkeypatch):
     monkeypatch.setenv('DISCORD_ALLOWED_USERS', '42')
     monkeypatch.setattr(SessionAuthority, '_schedule', lambda self, ref: None)
     runner = GatewayRunner(GatewayConfig(sessions_dir=tmp_path / 'sessions'))
-    db = SessionDB(tmp_path / 'state.db')
-    runner.session_store._db = runner._session_db = db
     authority = await initialize_session_authority(
-        runner, profile_id='default', instance_id='thread-metadata', db=db)
+        runner, profile_id='default', instance_id='thread-metadata')
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token='fixture-token', typing_indicator=False))
     runner.adapters = {Platform.DISCORD: adapter}
     runner._wire_adapter_handlers(adapter)
@@ -44,8 +41,8 @@ async def _renamed_thread(tmp_path, monkeypatch):
 
 
 def _automation_rows(authority, session_id):
-    return [row for row in list_session_admissions(authority.db, session_id=session_id, pending_only=False)
-            if row['principal_id'].startswith('automation:')]
+    return [row for row in authority.persistence.admissions.list(session_id=session_id, pending_only=False)
+            if row.principal_id.startswith('automation:')]
 
 
 @pytest.mark.asyncio
@@ -57,8 +54,8 @@ async def test_notice_after_thread_metadata_changes_keeps_owner_and_retry_identi
         assert opening_origin == opening.to_dict()
         assert opening_origin['chat_name'] != current.chat_name
         assert opening_origin['auto_thread_created'] is True
-        expected_source = deepcopy(get_session_admission(
-            authority.db, admission_id=latest.admission_id)['payload']['native_text_v1']['source'])
+        expected_source = deepcopy(authority.persistence.admissions.get(
+            admission_id=latest.admission_id).payload['native_text_v1']['source'])
         expected_source.pop('message_id')
         notice = dict(type=kind, session_id='proc_thread', started_at=1.0, delegation_id='deleg_thread',
                       session_key=entry.session_key, parent_session_id=entry.session_id,
@@ -68,7 +65,7 @@ async def test_notice_after_thread_metadata_changes_keeps_owner_and_retry_identi
         assert await runner._inject_watch_notification('Inspection finished', notice, raise_not_accepted=True) is True
         admitted = _automation_rows(authority, latest.ref.session_id)
         assert len(admitted) == 1
-        envelope = admitted[0]['payload']['native_text_v1']
+        envelope = admitted[0].payload['native_text_v1']
         assert envelope['source'] == expected_source
         assert 'message_id' not in envelope['source']
         assert 'auto_thread_created' not in envelope['source']
@@ -77,11 +74,11 @@ async def test_notice_after_thread_metadata_changes_keeps_owner_and_retry_identi
 
         assert await runner._inject_watch_notification(
             'Inspection finished', deepcopy(notice), raise_not_accepted=True) is True
-        assert [row['admission_id'] for row in _automation_rows(authority, latest.ref.session_id)] == [
-            admitted[0]['admission_id']]
+        assert [row.admission_id for row in _automation_rows(authority, latest.ref.session_id)] == [
+            admitted[0].admission_id]
         assert entry.origin.to_dict() == opening_origin
     finally:
-        authority.db.close()
+        authority.persistence.close()
 
 
 @pytest.mark.asyncio
@@ -97,11 +94,11 @@ async def test_thread_notice_still_refuses_changed_routing_or_transport(tmp_path
         event = MessageEvent(text='Inspection finished', source=source, internal=True,
                              metadata={'gateway_session_key': entry.session_key,
                                        'gateway_session_id': entry.session_id})
-        with pytest.raises(RuntimeStoreError, match='admission_conflict'):
+        with pytest.raises(AuthorityRefusal, match='admission_conflict'):
             await authority.admit_automation(adapter, event, 'thread-notice')
         assert _automation_rows(authority, latest.ref.session_id) == []
     finally:
-        authority.db.close()
+        authority.persistence.close()
 
 
 @pytest.mark.asyncio
@@ -111,15 +108,15 @@ async def test_notice_uses_committed_source_when_producer_hints_drift(tmp_path, 
     try:
         source = replace_source(current, **{changed_field: '9999'})
         assert runner.session_store._generate_session_key(source) == entry.session_key
-        expected = deepcopy(get_session_admission(
-            authority.db, admission_id=latest.admission_id)['payload']['native_text_v1']['source'])
+        expected = deepcopy(authority.persistence.admissions.get(
+            admission_id=latest.admission_id).payload['native_text_v1']['source'])
         expected.pop('message_id')
         event = MessageEvent(text='Inspection finished', source=source, internal=True,
                              metadata={'gateway_session_key': entry.session_key,
                                        'gateway_session_id': entry.session_id})
         receipt = await authority.admit_automation(adapter, event, 'thread-notice')
-        row = get_session_admission(authority.db, admission_id=receipt.admission_id)
-        assert row['target_session_id'] == latest.ref.session_id
-        assert row['payload']['native_text_v1']['source'] == expected
+        row = authority.persistence.admissions.get(admission_id=receipt.admission_id)
+        assert row.target_session_id == latest.ref.session_id
+        assert row.payload['native_text_v1']['source'] == expected
     finally:
-        authority.db.close()
+        authority.persistence.close()

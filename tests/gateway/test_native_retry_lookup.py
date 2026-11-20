@@ -16,7 +16,7 @@ from gateway.session_authority import initialize_session_authority
 from gateway.session_envelope import prepare_native, snapshot_native
 from gateway.session_ingress_context import native_callback, register_transport_home
 from hermes_constants import get_hermes_home
-from hermes_state_runtime import admit_session_input, cancel_session_input
+from tests.fixtures.storage_holder import raw_holder
 
 
 class _Adapter:
@@ -37,16 +37,17 @@ async def _legacy_retry(tmp_path, monkeypatch):
     source = event.source
     principal = 'messaging:' + json.dumps([source.profile, source.platform.value, source.chat_id,
                                          source.thread_id, source.user_id], separators=(',', ':'))
-    row = admit_session_input(authority.db, epoch=authority.epoch, principal_id=principal,
-                              session_id=ref.session_id, request_id=event.message_id, payload=legacy)
-    cancel_session_input(authority.db, epoch=authority.epoch, admission_id=row['admission_id'])
+    row, _ = authority.persistence.admissions.admit(
+        epoch=authority.epoch, principal_id=principal, session_id=ref.session_id,
+        request_id=event.message_id, payload=legacy)
+    authority.persistence.admissions.cancel(epoch=authority.epoch, admission_id=row.admission_id)
     return authority, event, legacy, principal, ref.session_id
 
 
 @pytest.mark.asyncio
 async def test_legacy_retry_waits_for_database_without_stalling_gateway_loop(tmp_path, monkeypatch):
     authority, event, legacy, _, _ = await _legacy_retry(tmp_path, monkeypatch)
-    db = authority.db
+    db = raw_holder(authority.persistence)
     db._wal_active = False  # Exercise the supported writer-connection read fallback.
     held, release, expired = threading.Event(), threading.Event(), threading.Event()
     read_started = asyncio.Event()
@@ -81,13 +82,13 @@ async def test_legacy_retry_waits_for_database_without_stalling_gateway_loop(tmp
         await holder
         if pending is not None:
             await pending
-        db.close()
+        authority.runner.session_store.close_all_db_handles()
 
 
 @pytest.mark.asyncio
 async def test_legacy_retry_cost_is_independent_of_unrelated_admissions(tmp_path, monkeypatch):
     authority, event, legacy, principal, session_id = await _legacy_retry(tmp_path, monkeypatch)
-    db = authority.db
+    db = raw_holder(authority.persistence)
     db._wal_active = False
 
     async def measured_retry(candidate):
@@ -124,4 +125,4 @@ async def test_legacy_retry_cost_is_independent_of_unrelated_admissions(tmp_path
         fresh, _ = await measured_retry(replace(event, message_id='new-input'))
         assert 'provenance' in fresh['native_text_v1']
     finally:
-        db.close()
+        authority.runner.session_store.close_all_db_handles()

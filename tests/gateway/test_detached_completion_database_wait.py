@@ -1,10 +1,11 @@
-"""Detached completion retries find their receipt without blocking the gateway on SessionDB."""
+"""Detached completion retries find their receipt without blocking the gateway on SQLite."""
 import asyncio
 from contextlib import contextmanager
 import threading
 
 import pytest
 
+from tests.fixtures.storage_holder import raw_holder
 from tests.gateway.test_authority_lane_moves_on import _app_turn
 from tests.gateway.test_detached_conversation_lifecycle import _automation_rows, _moved_on, _process_event
 from tests.waiting import async_wait_until
@@ -23,13 +24,13 @@ async def test_detached_completion_retry_finds_its_receipt(monkeypatch, database
     assert await runner._inject_watch_notification('[process proc_1 finished]', event) is True
     rows = await async_wait_until(
         lambda: [row for row in _automation_rows(authority, ref.session_id, live.route)
-                 if row['status'] == 'terminal'], timeout=10, what='the detached completion receipt')
+                 if row.status == 'terminal'], timeout=10, what='the detached completion receipt')
     # Settlement precedes drain cleanup; finish it before contending on the retry's database read.
     await asyncio.wait_for(live.task, 10)
     assert runner.session_store.lookup_by_session_key(live.route) is None
 
     if database_wait:
-        db = authority.db
+        db = raw_holder(authority.persistence)
         db._wal_active = False
         held, release, expired = threading.Event(), threading.Event(), threading.Event()
         started = asyncio.Event()
@@ -66,5 +67,5 @@ async def test_detached_completion_retry_finds_its_receipt(monkeypatch, database
     else:
         receipt = await completion_admission(runner, event)
 
-    assert receipt['admission_id'] == rows[0]['admission_id']
+    assert receipt['admission_id'] == rows[0].admission_id
     assert receipt['target_session_id'] == ref.session_id

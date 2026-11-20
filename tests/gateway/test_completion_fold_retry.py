@@ -17,7 +17,7 @@ async def test_retry_of_an_individual_or_folded_completion_does_not_fold_again(t
         await complete('proc_b')
         after = queued()
         assert len(after) == 2
-        assert after[-1]['admission_id'] == before['admission_id']
-        assert after[-1]['payload'] == before['payload']
+        assert after[-1].admission_id == before.admission_id
+        assert after[-1].payload == before.payload
     finally:
-        authority.db.close()
+        authority.persistence.close()
