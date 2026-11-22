@@ -111,7 +111,7 @@ def test_sealed_fork_boot_prefers_bundled_dependencies_over_stale_generation(tmp
     )
     result = subprocess.run(
         [sys.executable, "-c", code, str(root)],
-        env=dict(os.environ), text=True, capture_output=True, timeout=30,
+        env=dict(os.environ), text=True, capture_output=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "bundled"
@@ -189,7 +189,9 @@ def test_manual_repair_bypasses_damaged_generation_activation(tmp_path, monkeypa
     site_packages(environment).mkdir(parents=True)
     (environment / "pyvenv.cfg").write_text("home = test", encoding="utf-8")
     (generation / ".lease-managed").touch()
-    (generation / ".leases").write_text("not a directory", encoding="utf-8")
+    damaged = install_state_dir(repo) / "leases" / "environments" / "damaged"
+    damaged.parent.mkdir(parents=True)
+    damaged.write_text("not a directory", encoding="utf-8")
     runtime_facts_path(repo).write_text(json.dumps({"schema": 1, "packages": {"venv": {
         "environment": str(environment), "extras": [], "stamp": "old",
     }}}), encoding="utf-8")

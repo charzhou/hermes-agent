@@ -800,6 +800,12 @@ class TestRunOnMcpLoop:
 class TestToolHandler:
     """Tool handlers are sync functions that schedule work on the MCP loop."""
 
+    @pytest.fixture
+    def trusted_test_server(self, monkeypatch):
+        from tools.mcp_tool import _server_trust_levels
+
+        monkeypatch.setitem(_server_trust_levels, "test_srv", "full")
+
     def _patch_mcp_loop(self, coro_side_effect=None):
         """Return a patch for _run_on_mcp_loop that runs the coroutine directly."""
         def fake_run(coro_or_factory, timeout=30):
@@ -846,7 +852,7 @@ class TestToolHandler:
             }
         }
 
-    def test_opted_in_handler_passes_context_meta_separate_from_arguments(self):
+    def test_opted_in_handler_passes_context_meta_separate_from_arguments(self, trusted_test_server):
         from gateway.session_context import clear_session_vars, set_session_vars
         import model_tools
         from tools.registry import ToolRegistry
@@ -891,7 +897,7 @@ class TestToolHandler:
             assert result["result"] == "ok"
             assert arguments == {"name": "world"}
             assert json.dumps(registry.get_schema("mcp_test_srv_greet"), sort_keys=True) == schema_before
-            mock_session.call_tool.assert_called_once_with(
+            mock_session.call_tool.assert_awaited_once_with(
                 "greet",
                 arguments={"name": "world"},
                 meta={
@@ -912,7 +918,7 @@ class TestToolHandler:
             clear_session_vars(tokens)
             _servers.pop("test_srv", None)
 
-    def test_concurrent_context_snapshots_survive_context_free_loop_hop(self):
+    def test_concurrent_context_snapshots_survive_context_free_loop_hop(self, trusted_test_server):
         from gateway.session_context import clear_session_vars, set_session_vars
         from tools.mcp_tool_handlers import _make_tool_handler
         from tools.mcp_tool import _servers
@@ -993,7 +999,7 @@ class TestToolHandler:
         finally:
             _servers.pop("test_srv", None)
 
-    def test_context_snapshot_is_reused_after_recovery(self):
+    def test_context_snapshot_is_reused_after_recovery(self, trusted_test_server):
         from gateway.session_context import clear_session_vars, set_session_vars
         from tools.mcp_tool import _servers
         from tools.mcp_tool_handlers import _make_tool_handler
@@ -1021,8 +1027,8 @@ class TestToolHandler:
                 result = json.loads(_make_tool_handler("test_srv", "greet", 120)(
                     {"name": "world"}, tool_call_id="call-A"))
             assert result["result"] == "ok"
-            assert session.call_tool.call_count == 2
-            for call in session.call_tool.call_args_list:
+            assert session.call_tool.await_count == 2
+            for call in session.call_tool.await_args_list:
                 assert call.kwargs == {
                     "arguments": {"name": "world"},
                     "meta": {"io.nous.hermes/context": {
@@ -1034,7 +1040,7 @@ class TestToolHandler:
             clear_session_vars(tokens)
             _servers.pop("test_srv", None)
 
-    def test_context_forwarding_does_not_change_mcp_tool_schema(self):
+    def test_context_forwarding_does_not_change_mcp_tool_schema(self, trusted_test_server):
         from gateway.session_context import clear_session_vars, set_session_vars
         from tools.mcp_tool_schema import _convert_mcp_schema
         from tools.mcp_tool_handlers import _make_tool_handler
@@ -1057,6 +1063,7 @@ class TestToolHandler:
             handler = _make_tool_handler("test_srv", "greet", 120)
             with self._patch_mcp_loop():
                 handler({"name": "world"}, task_id="task-A")
+            mock_session.call_tool.assert_awaited_once()
             schema_after = json.dumps(
                 _convert_mcp_schema("test_srv", tool), sort_keys=True
             )
