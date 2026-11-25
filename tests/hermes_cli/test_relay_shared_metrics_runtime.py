@@ -1192,10 +1192,10 @@ def test_core_turn_restores_platform_after_exception(direct_runtime, monkeypatch
 
 
 def test_subagent_turn_preserves_inherited_parent_platform(direct_runtime, monkeypatch):
-    from gateway.session_context import clear_session_vars, get_session_env, set_session_vars
+    from gateway.session_context import get_session_env, reset_session_vars, set_session_vars
     from run_agent import AIAgent
 
-    tokens = set_session_vars(platform="telegram")
+    set_session_vars(platform="telegram")
     agent = object.__new__(AIAgent)
     agent.session_id = "child-session"
     agent.platform = "subagent"
@@ -1215,7 +1215,7 @@ def test_subagent_turn_preserves_inherited_parent_platform(direct_runtime, monke
         assert observed == ["telegram"]
         assert get_session_env("HERMES_SESSION_PLATFORM") == "telegram"
     finally:
-        clear_session_vars(tokens)
+        reset_session_vars()
 
 
 def test_skipped_turn_does_not_finish_another_sessions_matching_task(
@@ -2942,8 +2942,8 @@ def test_install_snapshot_is_daily_and_carries_only_bucketed_counts(
     lifecycle.invoke_hook("pre_llm_call", **event)
     lifecycle.finalize_session(session_id="t3")
 
-    [snapshot] = _stored_counters(tmp_path)["hermes.install.snapshot"]
-    assert snapshot == {
+    [snapshot] = _stored_counters(tmp_path)["hermes.install.snapshot"]  # group chats, hosting: own files
+    assert {k: v for k, v in snapshot.items() if not k.startswith(("group_chat_", "hosting"))} == {
         "cron_job_count_bucket": "0", "display_language": "en", "install_age_bucket": snapshot["install_age_bucket"],
         "main_provider": "none", "mcp_server_count_bucket": "1", "memory_provider": "plugin",
         "messaging_platform_count_bucket": "0", "plugin_count_bucket": "3_to_5",

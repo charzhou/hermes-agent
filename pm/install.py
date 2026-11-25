@@ -15,6 +15,7 @@ from typing import Optional
 
 from pm import paths
 from pm.downloader import DownloadPaused, ProgressFn
+from pm.environments import remember_inherited_path
 from pm.filesystem import native, remove_tree, retry_held
 from pm.lock import Facts, Lockfile
 from pm.package import InstallError, Package, Runner, StatePackage, compose_env
@@ -1079,6 +1080,9 @@ def sync_venv(extras: Optional[list[str]] = None, *, explicit: bool = False,
     ("ok" with ``venv_rebuild`` false) and refusals ("failed") both get
     a receipt. Plugin selection data is discovered and published by the worker
     under this lock; no executable transaction phases cross the process boundary."""
+    from pm.environments import refuse_dependency_change
+
+    refuse_dependency_change()  # before the receipt: nothing of this install is touched
     from pm import receipt
 
     token = receipt.begin("sync")
@@ -1150,7 +1154,6 @@ def drift(*, include_venv: bool = True) -> dict[str, str]:
     lockfile = _lockfile()
     facts = _facts()
     runtime_facts = Facts(paths.runtime_facts_path()) if paths.runtime_facts_path().is_file() else None
-    store = _store()
     target = current_target()
     for name in lockfile.names():
         try:
@@ -1291,6 +1294,7 @@ def activate(*, allow_incomplete: bool = False) -> list[str]:
     path = os.environ.get("PATH", "")
     first = store_first_path(path)
     if first != path:
+        remember_inherited_path()
         os.environ["PATH"] = first
     return problems
 
